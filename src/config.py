@@ -36,12 +36,15 @@ class Config:
     project_directory: Path
     allowlist: List[str]                 # normalized handles
     allow_group_chat_guids: List[str]    # opt-in groups only
-    allowed_tools: List[str]
+    allowed_tools: List[str]             # may be empty (= text-only chat)
     forbidden_tools: List[str]
     poll_interval_seconds: float
     reply_rate_limit_per_minute: int
     daily_cost_cap_usd: float
+    per_call_cost_cap_usd: float
+    per_call_max_turns: int
     per_call_timeout_seconds: int
+    circuit_breaker_failures: int        # consecutive failures -> auto-PAUSE
     claude_binary: str
     debug: bool
 
@@ -51,14 +54,14 @@ class Config:
 
 
 def _validate_tools(allowed: List[str], forbidden: List[str]) -> None:
-    """Enforce Phase A→B preconditions on the tool lists."""
-    if not allowed:
-        raise ValueError(
-            "allowed_tools must be a non-empty list. The bridge will not "
-            "invoke claude with an empty allow-list (would default to "
-            "the full toolset, which is the failure mode we're guarding "
-            "against)."
-        )
+    """Enforce Phase A→B preconditions on the tool lists.
+
+    Empty allowed_tools list is OK — that maps to ``--tools ""`` which
+    disables all tools (pure text chat). This is the recommended default
+    given that any filesystem-reading tool can be coerced via prompt
+    injection into echoing arbitrary file contents back over iMessage
+    (see THREAT_MODEL.md adversarial review round 2, finding C3).
+    """
     bad = HARD_FORBIDDEN_TOOLS & set(allowed)
     if bad:
         raise ValueError(
@@ -116,12 +119,12 @@ def load(path: Path) -> Config:
     if not isinstance(group_guids, list):
         raise ValueError("allow_group_chat_guids must be a list")
 
-    # PHASE A→B PRECONDITION: tools must be explicitly declared.
+    # PHASE A→B PRECONDITION: tools key must be present (may be empty list).
     if "allowed_tools" not in raw:
         raise ValueError(
-            "config.yaml is missing the 'allowed_tools' key. Phase B "
-            "requires an explicit allowlist (no implicit defaults) — see "
-            "config.example.yaml for a starting point."
+            "config.yaml is missing the 'allowed_tools' key. Set it to "
+            "an explicit list (use [] for text-only chat, no tools). See "
+            "config.example.yaml."
         )
     allowed = raw["allowed_tools"]
     forbidden = raw.get("forbidden_tools", [])
@@ -141,9 +144,26 @@ def load(path: Path) -> Config:
     if cost <= 0:
         raise ValueError("daily_cost_cap_usd must be > 0")
 
-    timeout = int(raw.get("per_call_timeout_seconds", 120))
+    per_call_cap = float(raw.get("per_call_cost_cap_usd", 0.50))
+    if per_call_cap <= 0:
+        raise ValueError("per_call_cost_cap_usd must be > 0")
+    if per_call_cap > cost:
+        raise ValueError(
+            f"per_call_cost_cap_usd ({per_call_cap}) must be <= "
+            f"daily_cost_cap_usd ({cost})"
+        )
+
+    max_turns = int(raw.get("per_call_max_turns", 1))
+    if max_turns < 1 or max_turns > 20:
+        raise ValueError("per_call_max_turns must be in [1, 20]")
+
+    timeout = int(raw.get("per_call_timeout_seconds", 90))
     if timeout < 10 or timeout > 600:
         raise ValueError("per_call_timeout_seconds must be in [10, 600]")
+
+    breaker = int(raw.get("circuit_breaker_failures", 5))
+    if breaker < 2 or breaker > 100:
+        raise ValueError("circuit_breaker_failures must be in [2, 100]")
 
     claude_bin = str(raw.get("claude_binary", DEFAULT_CLAUDE_BIN))
     if not Path(claude_bin).is_file():
@@ -163,7 +183,10 @@ def load(path: Path) -> Config:
         poll_interval_seconds=poll,
         reply_rate_limit_per_minute=rate,
         daily_cost_cap_usd=cost,
+        per_call_cost_cap_usd=per_call_cap,
+        per_call_max_turns=max_turns,
         per_call_timeout_seconds=timeout,
+        circuit_breaker_failures=breaker,
         claude_binary=claude_bin,
         debug=debug,
     )

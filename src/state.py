@@ -93,6 +93,13 @@ def _secure_open_db(path: Path) -> sqlite3.Connection:
 def init_state_dir(state_dir: Path = DEFAULT_STATE_DIR) -> Path:
     """Create the state directory with restrictive perms and init schema.
 
+    Also provisions:
+    - ``<state_dir>/sandbox/``: empty directory used as claude -p cwd.
+      Empty by design so claude doesn't load CLAUDE.md or discover any
+      .mcp.json from the user's actual project tree.
+    - ``<state_dir>/empty-mcp.json``: minimal MCP config (no servers),
+      passed to claude via ``--strict-mcp-config --mcp-config``.
+
     Returns the state.db Path.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +107,24 @@ def init_state_dir(state_dir: Path = DEFAULT_STATE_DIR) -> Path:
         os.chmod(state_dir, 0o700)
     except OSError as e:
         logger.warning("Could not chmod state dir: %s", e)
+
+    # Sandbox for claude -p invocations.
+    sandbox = state_dir / "sandbox"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(sandbox, 0o700)
+    except OSError:
+        pass
+
+    # Empty MCP config. Recreate every init so a user/attacker tampering
+    # with it gets reset on each daemon start.
+    mcp_path = state_dir / "empty-mcp.json"
+    mcp_path.write_text('{"mcpServers":{}}\n')
+    try:
+        os.chmod(mcp_path, 0o600)
+    except OSError:
+        pass
+
     db_path = state_dir / "state.db"
     conn = _secure_open_db(db_path)
     try:
@@ -108,6 +133,16 @@ def init_state_dir(state_dir: Path = DEFAULT_STATE_DIR) -> Path:
     finally:
         conn.close()
     return db_path
+
+
+def sandbox_dir(state_dir: Path = DEFAULT_STATE_DIR) -> Path:
+    """Path to the empty cwd used for hermetic claude -p invocations."""
+    return state_dir / "sandbox"
+
+
+def mcp_config_path(state_dir: Path = DEFAULT_STATE_DIR) -> Path:
+    """Path to the empty MCP config file."""
+    return state_dir / "empty-mcp.json"
 
 
 @contextmanager
@@ -363,3 +398,46 @@ def cost_over_cap(cap_usd: float, *, state_dir: Path = DEFAULT_STATE_DIR) -> boo
     """True if today's spend already meets or exceeds the cap."""
     cap_cents = int(round(cap_usd * 100))
     return today_cost_cents(state_dir=state_dir) >= cap_cents
+
+
+# --- Circuit breaker for consecutive Claude failures -----------------------
+
+def get_consecutive_failures(*, state_dir: Path = DEFAULT_STATE_DIR) -> int:
+    """Current run of back-to-back Claude failures. Reset by success."""
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT value FROM cursor WHERE name = 'consec_failures'"
+        ).fetchone()
+        return int(row["value"]) if row else 0
+
+
+def record_claude_failure(*, state_dir: Path = DEFAULT_STATE_DIR) -> int:
+    """Increment consecutive-failure counter; return new value."""
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO cursor (name, value) VALUES ('consec_failures', 1) "
+            "ON CONFLICT(name) DO UPDATE SET value = value + 1"
+        )
+        row = conn.execute(
+            "SELECT value FROM cursor WHERE name = 'consec_failures'"
+        ).fetchone()
+        return int(row["value"])
+
+
+def reset_claude_failures(*, state_dir: Path = DEFAULT_STATE_DIR) -> None:
+    """Set consecutive-failure counter to 0 (on success)."""
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO cursor (name, value) VALUES ('consec_failures', 0) "
+            "ON CONFLICT(name) DO UPDATE SET value = 0"
+        )
+
+
+def trip_pause(state_dir: Path = DEFAULT_STATE_DIR, *, reason: str = "") -> None:
+    """Create the PAUSE file so the daemon idles until the user removes it."""
+    pause = state_dir / "PAUSE"
+    pause.write_text(reason + "\n")
+    try:
+        os.chmod(pause, 0o600)
+    except OSError:
+        pass

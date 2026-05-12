@@ -22,27 +22,27 @@ allowlist:
 # Anyone in an opted-in group can drive the bot — be conservative.
 allow_group_chat_guids: []
 
-# What Claude is allowed to do via this surface. Defaults are deliberately
-# minimal — read-only filesystem inspection. NO `WebFetch`, NO `Skill`,
-# NO `Bash`. Both are easy exfiltration vectors via prompt injection.
-# Add them at your own risk.
-allowed_tools:
-  - Read
-  - Grep
-  - Glob
-  - LS
+# What Claude is allowed to do via this surface.
+#
+# DEFAULT IS EMPTY — text-only chat. No filesystem access. This is the
+# only setting that's safe by default given the iMessage threat model:
+# any filesystem-reading tool (Read, Grep, Glob, LS) can be coerced via
+# prompt injection into echoing arbitrary file contents back over
+# iMessage, and that reply lands on every Apple-ID-signed-in device
+# (including potentially family-shared ones).
+#
+# If you understand and accept the trade-off, you can add tools below.
+# Recommended additions: NONE for v0. Try the bridge with empty list
+# first, decide later.
+#
+# Tools that are HARD-FORBIDDEN regardless of what you put here:
+# Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch,
+# Skill, and any mcp__* tool. Daemon refuses to start if you list them.
+allowed_tools: []
 
-# Tools that are always denied, even if added to allowed_tools by mistake.
-# Belt-and-suspenders.
-forbidden_tools:
-  - Bash
-  - Write
-  - Edit
-  - MultiEdit
-  - NotebookEdit
-  # NB: WebFetch and Skill are NOT in the default forbidden list because
-  # we want users to make a deliberate choice to add them to allowed.
-  # If you want hard-block, put them here.
+# Tools that are always denied at the config layer, on top of the
+# hard-forbidden set the daemon enforces. Belt-and-suspenders.
+forbidden_tools: []
 
 # How often to poll chat.db (seconds). >= 1.0.
 poll_interval_seconds: 3.0
@@ -55,9 +55,25 @@ reply_rate_limit_per_minute: 10
 # When met, daemon refuses to invoke claude until the next UTC day.
 daily_cost_cap_usd: 5.00
 
+# Per-call cost cap. If one claude response somehow spends more than this,
+# the bridge logs it and refuses to send the reply (the spend already
+# happened, but we suppress the reply that might have been the very thing
+# that ran up the bill).
+per_call_cost_cap_usd: 0.50
+
+# Cap on claude's tool-use loop length. With allowed_tools=[] and 1 turn,
+# this is a single text response with no tool calls. Bump if you opt-in
+# to tools and want claude to use them iteratively.
+per_call_max_turns: 1
+
 # Per-call timeout. Long-running claude responses are killed at this
 # threshold rather than blocking the daemon's main loop indefinitely.
-per_call_timeout_seconds: 120
+per_call_timeout_seconds: 90
+
+# Auto-PAUSE after this many consecutive Claude failures (timeout, exec
+# error, JSON parse error). User sees one iMessage notification, then the
+# bridge idles until they remove ~/.claude-imessage-bridge/PAUSE.
+circuit_breaker_failures: 5
 
 # Path to the Claude Code CLI binary. Default fits a Homebrew /usr/local
 # install; adjust if you installed elsewhere (e.g., the new native installer

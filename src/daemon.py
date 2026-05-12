@@ -23,12 +23,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import shutil
 import signal
 import sys
 import time
 from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 from . import claude_runner
 from . import config as config_mod
@@ -142,6 +142,29 @@ def _classify(body: str) -> str:
     return "text"
 
 
+def _user_facing_error(category: Optional[str], consec_failures: int) -> str:
+    """Translate a claude_runner error category into a user-safe message.
+
+    Critically: NEVER include the underlying error string. Claude's stderr
+    can contain file paths, MCP server names, traceback fragments — all
+    leak info to anyone with iMessage access to this account (per
+    adversarial review S3).
+    """
+    suffix = (
+        f"\n(Run #{consec_failures} of consecutive failures; bridge auto-"
+        "pauses at the configured threshold.)" if consec_failures > 1 else ""
+    )
+    if category == "timeout":
+        return "⚠️ Claude timed out. Try a simpler prompt." + suffix
+    if category == "exec_error":
+        return "⚠️ Couldn't run Claude. Check daemon logs." + suffix
+    if category == "json_parse":
+        return "⚠️ Got a malformed response from Claude. Check daemon logs." + suffix
+    if category == "claude_error":
+        return "⚠️ Claude reported an error. Try again." + suffix
+    return "⚠️ Reply unavailable. Check daemon logs." + suffix
+
+
 def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     """Process a single inbound message: decide, rate-limit, reply.
 
@@ -228,25 +251,27 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         )
         return
 
-    # Invoke claude. claude_runner enforces the safe-argv invariants
-    # (no --dangerously-skip-permissions, no forbidden tools, no MCP-
-    # namespaced tools). It returns a structured result; we never raise
-    # on Claude-side errors, we just report.
+    # Invoke claude in the hermetic sandbox. claude_runner enforces the
+    # safe-argv invariants (no --dangerously-skip-permissions, no
+    # forbidden tools, no MCP-namespaced tools, -- separator before
+    # prompt). It returns a structured result; we never raise on
+    # Claude-side errors, just report.
     try:
         result = claude_runner.run_claude(
             msg.body,
-            cwd=cfg.project_directory,
+            sandbox_cwd=state.sandbox_dir(),
+            mcp_config_path=state.mcp_config_path(),
             allowed_tools=cfg.allowed_tools,
+            max_turns=cfg.per_call_max_turns,
             timeout_seconds=cfg.per_call_timeout_seconds,
             claude_bin=cfg.claude_binary,
         )
     except claude_runner.RunnerConfigError as e:
-        # Configuration issue — daemon shouldn't have reached this point;
-        # log loudly and tell the user something generic.
         logger.error("runner config error: %s", e)
         result = claude_runner.ClaudeResult(
             success=False, reply="", session_id=None, cost_usd=0.0,
             duration_ms=0, error="runner config error",
+            error_category="exec_error",
         )
 
     # Cost accounting always — even on error, claude may have charged us
@@ -255,7 +280,43 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     if cents:
         state.add_cost_cents(cents)
 
+    # Per-call cost cap: if a single response somehow spent more than the
+    # cap, suppress the reply (the spend already happened; we don't want
+    # to send whatever the model produced — it might be the very thing
+    # that ran up the bill).
+    per_call_cap_cents = int(round(cfg.per_call_cost_cap_usd * 100))
+    if cents > per_call_cap_cents:
+        logger.error(
+            "per-call cost cap exceeded: %d cents > %d cents",
+            cents, per_call_cap_cents,
+        )
+        _metrics["per_call_cap_hits"] += 1
+        state.audit(
+            handle_redacted=redacted,
+            direction="out",
+            kind="drop",
+            detail=f"per-call-cap dur={result.duration_ms}ms cents={cents}",
+        )
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(
+                    handle=norm,
+                    body=(
+                        "⚠️ Reply suppressed — that response cost "
+                        f"${result.cost_usd:.2f} (cap is "
+                        f"${cfg.per_call_cost_cap_usd:.2f}). Try a "
+                        "shorter prompt."
+                    ),
+                ),
+            )
+        except imessage_sender.SendError:
+            pass
+        return
+
+    # Circuit breaker: track consecutive failures and auto-PAUSE if we
+    # cross the threshold. Resets to 0 on each success.
     if result.success:
+        state.reset_claude_failures()
         reply_body = result.reply.strip() or "(claude returned an empty response)"
         kind = "reply"
         detail = (
@@ -264,12 +325,28 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             f"sid={(result.session_id or 'none')[:8]}"
         )
     else:
-        reply_body = (
-            "⚠️ Claude returned an error. "
-            f"({(result.error or 'unknown')[:120]})"
+        failures = state.record_claude_failure()
+        _metrics["claude_failures"] += 1
+        # User-facing error is GENERIC. The actual error string (which may
+        # contain file paths or internal info) is logged server-side only.
+        reply_body = _user_facing_error(result.error_category, failures)
+        kind = "reply"
+        detail = (
+            f"err category={result.error_category} "
+            f"consec={failures} "
+            f"dur={result.duration_ms}ms "
+            f"raw={result.error or 'unknown'}"
         )
-        kind = "reply"  # we still send something, even if it's an error
-        detail = f"err {result.error or 'unknown'}"
+        if failures >= cfg.circuit_breaker_failures:
+            logger.error(
+                "circuit breaker tripped after %d consecutive failures — "
+                "creating PAUSE file",
+                failures,
+            )
+            state.trip_pause(
+                reason=f"auto: {failures} consecutive claude failures "
+                f"(category={result.error_category})",
+            )
 
     try:
         imessage_sender.send(
