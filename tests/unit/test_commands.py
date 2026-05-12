@@ -132,12 +132,12 @@ def test_use_requires_query(state_dir: Path):
 def test_use_single_match_auto_resumes(state_dir: Path, monkeypatch):
     monkeypatch.setattr(
         session_discovery, "search_sessions",
-        lambda q, limit, exclude_session_ids: [_mk_session("wesco-1")],
+        lambda q, limit, exclude_session_ids: [_mk_session("auth-refactor-1")],
     )
     r = commands.parse_and_dispatch(
-        "/use wesco", handle=HANDLE, state_dir=state_dir,
+        "/use auth-refactor", handle=HANDLE, state_dir=state_dir,
     )
-    assert r.set_session_id == "wesco-1"
+    assert r.set_session_id == "auth-refactor-1"
     assert "Resumed" in r.reply
 
 
@@ -145,11 +145,11 @@ def test_use_multiple_matches_offers_pick(state_dir: Path, monkeypatch):
     monkeypatch.setattr(
         session_discovery, "search_sessions",
         lambda q, limit, exclude_session_ids: [
-            _mk_session("wesco-1"), _mk_session("wesco-2"),
+            _mk_session("auth-refactor-1"), _mk_session("auth-refactor-2"),
         ],
     )
     r = commands.parse_and_dispatch(
-        "/use wesco", handle=HANDLE, state_dir=state_dir,
+        "/use auth-refactor", handle=HANDLE, state_dir=state_dir,
     )
     assert "[1]" in r.reply
     assert "[2]" in r.reply

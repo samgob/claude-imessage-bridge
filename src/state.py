@@ -96,6 +96,17 @@ class SchemaTooNew(RuntimeError):
     """state.db has a higher user_version than this code understands."""
 
 
+class SchemaMigrationMissing(RuntimeError):
+    """state.db is on a lower version than this code, and no registered
+    migration knows how to bring it forward.
+
+    Refusing to start is the right default: silently stamping forward would
+    mean a future v2 of the bridge run against a v1 DB without a v1→v2
+    migration registered would proceed with v2 code against v1 data — the
+    kind of code-vs-doc drift that hides real bugs.
+    """
+
+
 def _apply_schema(conn: sqlite3.Connection) -> None:
     """Apply schema migrations forward to ``SCHEMA_VERSION``.
 
@@ -146,14 +157,16 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # If we add more versions, chain the migrations here.
     # Example: if current < 2: apply v1→v2 …
     if current < SCHEMA_VERSION:
-        # Forward-incompatible code path: warn loud and stamp the version.
-        logger.warning(
-            "state.db user_version=%d; this code expects %d but has no "
-            "registered migration. Stamping forward.",
-            current, SCHEMA_VERSION,
+        # No registered migration knows how to bring us forward. Refuse
+        # rather than silently stamp — silent stamping would let v2 code
+        # run against v1 data and hide real bugs. Round-4 solver finding.
+        raise SchemaMigrationMissing(
+            f"state.db user_version={current}, but this code is "
+            f"SCHEMA_VERSION={SCHEMA_VERSION} and no v{current}→"
+            f"v{current+1} migration is registered. Either pull a "
+            "newer build that has the migration, or reset state.db "
+            "deliberately (see docs/RECOVERY.md)."
         )
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
 
 
 def _secure_open_db(path: Path) -> sqlite3.Connection:

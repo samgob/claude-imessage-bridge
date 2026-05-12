@@ -133,7 +133,7 @@ def _sessions(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:
 def _use(*, handle: str, state_dir: Path, query: str) -> CommandResult:
     """Search sessions by keyword. Auto-resume if single match; numbered list otherwise."""
     if not query:
-        return CommandResult(reply="Usage: /use <keyword>. Example: /use wesco")
+        return CommandResult(reply="Usage: /use <keyword>. Example: /use auth-refactor")
     current = state.get_current_session(handle, state_dir=state_dir)
     excluded = {current} if current else set()
     sessions = session_discovery.search_sessions(

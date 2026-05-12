@@ -8,8 +8,18 @@ the privileged tool it is.
 
 Please **do not** open a public GitHub issue for security problems.
 
-Email the maintainer privately at the address listed on the GitHub profile
-for [@samgob](https://github.com/samgob). Include:
+**Preferred:** use [GitHub Private Vulnerability Reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
+on this repository. Navigate to the **Security** tab → "Report a
+vulnerability". This routes the report to the maintainer with the
+correct privacy and creates a private advisory draft we can collaborate on.
+
+**Fallback:** email the maintainer at the address listed on the GitHub
+profile for [@samgob](https://github.com/samgob). If you don't hear
+back within 7 days, also open a Private Vulnerability Report on the
+repo (the email may have hit spam — the GitHub flow has stronger
+delivery guarantees).
+
+Include in either channel:
 
 - The vulnerability and how to reproduce
 - The version/commit you tested

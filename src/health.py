@@ -86,18 +86,25 @@ def write_status(
         fd, tmp = tempfile.mkstemp(
             prefix=".status.", suffix=".tmp", dir=str(state_dir),
         )
+        # Track whether the rename completed; if not, the tmp file is
+        # garbage and we should remove it. Using ``try/finally`` here
+        # (not ``except OSError`` as the prior implementation did) means
+        # MemoryError, KeyboardInterrupt, or any other non-OSError
+        # exception during the write also triggers cleanup, avoiding
+        # leftover ``.status.*.tmp`` orphans across daemon restarts.
+        renamed = False
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(body)
             os.chmod(tmp, 0o600)
             os.replace(tmp, str(status_path))
-        except OSError:
-            # Best effort: try to clean up the tmp on partial failure.
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+            renamed = True
+        finally:
+            if not renamed:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
     except OSError as e:
         logger.warning("could not write status.json: %s", e)
     return status_path

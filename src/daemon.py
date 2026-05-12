@@ -393,11 +393,20 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         # contain file paths or internal info) is logged server-side only.
         reply_body = _user_facing_error(result.error_category)
         kind = "reply"
+        # Audit ``detail`` MUST NOT carry the raw error string or the
+        # consecutive-failure counter — both are server-side-only per
+        # THREAT_MODEL S8 and SECURITY.md (state.db is documented as
+        # not containing them). Round-4 adversarial finding.
+        # The error_category column carries the structured signal a forensic
+        # query needs; the full error + failure count go to logger only.
+        logger.warning(
+            "claude failure handle=%s category=%s consec=%d dur=%dms raw=%r",
+            redacted, result.error_category, failures,
+            result.duration_ms, result.error,
+        )
         detail = (
             f"err category={result.error_category} "
-            f"consec={failures} "
-            f"dur={result.duration_ms}ms "
-            f"raw={result.error or 'unknown'}"
+            f"dur={result.duration_ms}ms"
         )
         if failures >= cfg.circuit_breaker_failures:
             logger.error(
@@ -513,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
     state_dir = state.DEFAULT_STATE_DIR
     try:
         state.init_state_dir(state_dir)
-    except state.SchemaTooNew as e:
+    except (state.SchemaTooNew, state.SchemaMigrationMissing) as e:
         print(f"state.db schema error: {e}", file=sys.stderr)
         return 5
 

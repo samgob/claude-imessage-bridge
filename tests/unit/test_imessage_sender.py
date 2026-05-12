@@ -237,9 +237,10 @@ def test_send_raises_on_osascript_failure(monkeypatch):
 # --- Handle redaction --------------------------------------------------
 
 def test_redact_handle_email_masks_local():
-    out = imessage_sender._redact_handle("samuel.gobrail@example.com")
-    assert "samuel" not in out
-    assert out.startswith("sa")
+    out = imessage_sender._redact_handle("alice.smith@example.com")
+    assert "alice" not in out
+    assert "smith" not in out
+    assert out.startswith("al")
     assert "@example.com" in out
 
 

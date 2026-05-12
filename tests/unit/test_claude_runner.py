@@ -445,20 +445,42 @@ def test_run_claude_handles_timeout(monkeypatch, fake_claude_binary):
 
 # --- HARD_DISALLOWED coverage --------------------------------------------
 
-def test_hard_disallowed_covers_critical_tools():
-    """Regression test: if a tool is removed from HARD_DISALLOWED the build
-    has to consciously acknowledge that. These are the load-bearing denies.
+def test_hard_disallowed_exact_snapshot():
+    """Snapshot of HARD_DISALLOWED. Any addition or removal must update
+    this test consciously — that's the point. Round-4 adversarial finding
+    was that the prior 'required subset' test missed 11 entries actually
+    in the deny list (EnterWorktree, ExitWorktree, TaskStop, TaskOutput,
+    TodoWrite, NotebookRead, ListMcpResourcesTool, ReadMcpResourceTool,
+    EnterPlanMode, ExitPlanMode, AskUserQuestion) — a regression that
+    removed them would have passed silently.
     """
-    required = {
+    expected = frozenset({
+        # Filesystem write/exec
         "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-        "Read", "Grep", "Glob", "LS",
+        # Filesystem read
+        "Read", "Grep", "Glob", "LS", "NotebookRead",
+        # Network egress
         "WebFetch", "WebSearch",
+        # Tool/skill/agent loading
         "Skill", "Agent", "ToolSearch",
+        # Scheduling
         "CronCreate", "CronDelete", "CronList", "CronToggle", "ScheduleWakeup",
+        # Communication / out-of-band
         "AskUserQuestion", "RemoteTrigger", "PushNotification",
-    }
-    missing = required - set(claude_runner.HARD_DISALLOWED)
-    assert not missing, f"HARD_DISALLOWED missing tools: {sorted(missing)}"
+        # Task / state / plan
+        "TodoWrite", "TaskStop", "TaskOutput",
+        "EnterWorktree", "ExitWorktree", "EnterPlanMode", "ExitPlanMode",
+        # MCP introspection
+        "ListMcpResourcesTool", "ReadMcpResourceTool",
+    })
+    actual = frozenset(claude_runner.HARD_DISALLOWED)
+    added = actual - expected
+    removed = expected - actual
+    assert not (added or removed), (
+        "HARD_DISALLOWED drift — added: %s, removed: %s. Update this test "
+        "consciously to reflect the security review of the change."
+        % (sorted(added), sorted(removed))
+    )
 
 
 def test_hard_forbidden_subset_of_hard_disallowed():
@@ -467,10 +489,20 @@ def test_hard_forbidden_subset_of_hard_disallowed():
     Exception: ``HARD_FORBIDDEN_TOOLS`` is a strict subset that also blocks
     MCP-namespaced tools, which aren't enumerable in HARD_DISALLOWED.
     """
-    # Every non-MCP-prefixed HARD_FORBIDDEN_TOOL should appear in HARD_DISALLOWED.
     leaks = claude_runner.HARD_FORBIDDEN_TOOLS - claude_runner.HARD_DISALLOWED
-    # CronToggle isn't in HARD_DISALLOWED in some configs — but if so we want
-    # the test to flag it loudly so a maintainer adds it back.
     assert not leaks, (
         f"HARD_FORBIDDEN_TOOLS leak — forbidden but not denied: {sorted(leaks)}"
     )
+
+
+def test_assert_safe_argv_prefix_consistency():
+    """Every bare-flag entry in ARGV_DENYLIST must also be refused in the
+    `--flag=value` form. Round-4 finding: the prior hand-rolled prefix list
+    omitted some bare flags (e.g., `--no-permissions`); deriving the
+    prefix-form check from the exact set keeps them in sync.
+    """
+    bare_flags = [t for t in claude_runner.ARGV_DENYLIST if "=" not in t]
+    assert bare_flags, "ARGV_DENYLIST must contain at least some bare-flag entries"
+    for flag in bare_flags:
+        with pytest.raises(claude_runner.RunnerConfigError):
+            claude_runner._assert_safe_argv([flag + "=true"])

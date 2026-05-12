@@ -39,7 +39,7 @@ routes each inbound message to a Claude Code session of your choice via
 | Multiple allowlisted contacts | ✅ | each can drive a different session |
 | Numbered-options UX (no inline UI) | ✅ | works on any iMessage client (iPhone, Mac, Watch) |
 | List recent sessions | ✅ | `/sessions` (10 most-recent); `--all` includes routines |
-| Search sessions by keyword | ✅ | `/use wesco` matches by transcript content |
+| Search sessions by keyword | ✅ | `/use auth-refactor` matches by transcript content |
 | Start a fresh session | ✅ | `/new` |
 | Show current session | ✅ | `/status` |
 | Daily + per-call cost caps | ✅ | configurable, integer-cents accounting |
@@ -168,4 +168,4 @@ Full design rationale: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## License
 
-MIT (see [LICENSE](LICENSE) when added before public release).
+[MIT](LICENSE) — Copyright (c) 2026 samgob.

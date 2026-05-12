@@ -1,7 +1,8 @@
 """Invoke ``claude -p`` for a single inbound message and parse the result.
 
-Phase B scope: stateless invocation. Each inbound message spawns a fresh
-``claude -p`` call into a **hermetic sandbox**:
+Each inbound message spawns a fresh ``claude -p`` call into a **hermetic
+per-call sandbox** (a `tempfile.TemporaryDirectory` that vanishes when
+the call returns):
 
 - cwd is a dedicated empty directory (NOT the user's project_directory) so
   the user's global CLAUDE.md, .mcp.json, .claude/ skills, and settings.json
@@ -10,9 +11,22 @@ Phase B scope: stateless invocation. Each inbound message spawns a fresh
   server discovery and startup (no Gmail/Slack/Drive process inheritance).
 - ``--append-system-prompt`` injects a minimal "you are a text-only chat
   bot, no tools, no memory" role description.
-- ``--tools ""`` disables all built-in tools by default. The config opt-in
-  pattern is to list explicit tools, which then become the *only* tools
-  Claude may call (and are further filtered against HARD_FORBIDDEN_TOOLS).
+- **``--disallowed-tools <csv>`` is the real tool-deny mechanism.** This is
+  load-bearing and was the critical finding from round-3 adversarial
+  review. ``--allowed-tools`` is *additive* — it can only ADD patterns to
+  the allow-set, it cannot remove anything. ``--tools ""`` is a documented
+  no-op (verified empirically; the CLI accepts it but doesn't deny tools).
+  Bash, Read, Write, WebFetch, Skill, etc. are available by DEFAULT in
+  ``claude -p`` unless explicitly named in ``--disallowed-tools``. See
+  ``HARD_DISALLOWED`` below for the bridge's active deny set. Anything in
+  ``allowed_tools`` (user opt-in) is removed from that set per-call; it is
+  always filtered against ``HARD_FORBIDDEN_TOOLS`` at config-load time.
+- **Empirical startup selftest** (``selftest_bash_denied`` at the bottom of
+  this module) spawns one ``claude -p`` call and asserts Bash cannot write
+  a canary file. The daemon refuses to start if the canary appears. This
+  is the only way to verify the tool-deny boundary holds across Claude
+  Code releases — the documented flag semantics drifted at least once
+  already (the round-3 finding above).
 - ``--max-turns N`` (default 1) puts a hard ceiling on per-call spend
   before claude even starts spending.
 - ``--`` separator placed immediately before the prompt so a malicious
@@ -21,12 +35,14 @@ Phase B scope: stateless invocation. Each inbound message spawns a fresh
 - Child process is spawned with ``start_new_session=True`` so on timeout
   we can kill the whole process group, not just the immediate ``claude``
   process (Node MCP children otherwise survive as orphans).
-- Child environment is scrubbed: only PATH, HOME, ANTHROPIC_API_KEY (if
-  set), USER, LANG. No general env inheritance so a prompt that asks for
-  ``env`` can only see this whitelist.
+- Child environment is scrubbed: only PATH, HOME, USER, LANG, LC_ALL,
+  ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN. No general env inheritance
+  so a prompt that asks for ``env`` can only see this whitelist; TMPDIR
+  specifically is NOT inherited (attacker-controlled TMPDIR could be a
+  symlink ladder).
 
 Result is a structured ``ClaudeResult``. We never raise on Claude-side
-errors; those become ``success=False`` with ``error`` set.
+errors; those become ``success=False`` with ``error_category`` set.
 """
 
 from __future__ import annotations
@@ -195,16 +211,23 @@ def _validate_tool_list(tools: list[str]) -> None:
 
 
 def _assert_safe_argv(argv: list[str]) -> None:
-    """Refuse to exec argv containing any denylisted token (exact or prefix)."""
+    """Refuse to exec argv containing any denylisted token (exact or prefix).
+
+    The prefix-form (``--flag=value``) check derives from ARGV_DENYLIST
+    rather than a hand-rolled list — keeps exact-form and prefix-form
+    coverage consistent if a flag is later added/removed (round-4 solver
+    finding T2.R / adversarial #8). Entries in ARGV_DENYLIST that already
+    contain ``=`` are exact-match only (e.g., ``--permission-mode=…``).
+    """
+    # Bare flag names (no `=value`) that we also want to refuse in the
+    # `--flag=value` form. Derived once from ARGV_DENYLIST.
+    _bare = {tok for tok in ARGV_DENYLIST if "=" not in tok}
     for tok in argv:
         if not isinstance(tok, str):
             raise RunnerConfigError(f"non-string argv element: {tok!r}")
         if tok in ARGV_DENYLIST:
             raise RunnerConfigError(f"refusing argv with denylisted token: {tok!r}")
-        # Also catch prefix-style use of denied flags via =value:
-        for bad in ("--dangerously-skip-permissions",
-                    "--bypass-permissions",
-                    "--allow-dangerously-skip-permissions"):
+        for bad in _bare:
             if tok.startswith(bad + "="):
                 raise RunnerConfigError(f"refusing argv with denylisted flag form: {tok!r}")
 
@@ -253,6 +276,18 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+    # Final reckoning: if the process is STILL alive after SIGKILL, log
+    # loudly. We can't recover, but the operator needs a forensic trail
+    # of "the kill didn't actually kill anything" instead of silently
+    # returning success-shape from the timeout path (round-4 finding).
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        logger.critical(
+            "claude process group pgid=%s still alive after SIGKILL; "
+            "manual intervention may be required",
+            pgid,
+        )
 
 
 def _write_empty_mcp_safe(path: Path) -> None:

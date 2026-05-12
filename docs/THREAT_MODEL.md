@@ -157,6 +157,7 @@ No network ports are opened. All I/O is local. No telemetry.
   - **User-facing error messages strip internal detail.** `_user_facing_error` returns one of four canned strings keyed off `error_category`. The original error string (which may contain file paths, MCP server names, traceback fragments) and the consecutive-failure count (which leaks the circuit-breaker threshold to a probing attacker) are logged server-side only.
   - state.db is created mode 0o600 inside a 0o700 directory. If it exists at startup with looser perms, the daemon tightens it and logs a warning.
   - Logs go to `~/.claude-imessage-bridge/logs/` (planned), not the project repo.
+  - **`status.json` health sidecar** (`src/health.py`, Phase D) is written next to state.db every heartbeat. Atomic write via `tempfile.mkstemp` + `os.chmod(0o600)` + `os.replace`; tmp-file cleanup via `try/finally` so non-OSError exceptions (MemoryError, KeyboardInterrupt) don't leave `.status.*.tmp` orphans. The file contains: schema version, ts, pid, cursor, paused flag, stop-requested flag, consecutive-failure count, daily cost cents, daily cap, DB schema version, metrics counter snapshot. **No raw bodies, no session ids, no handles.** The metrics block uses non-PII labels (`msgs_in`, `replies`, `drops_<reason>`). The `consecutive_failures` field surfaces the circuit-breaker counter — a hostile local process with FDA can read it and infer breaker proximity, but FDA-local is already game-over territory per S9.
 
 ### S9. Confused-deputy / FDA abuse
 - **Surface:** Daemon has Full Disk Access (required for chat.db).
@@ -198,6 +199,12 @@ No network ports are opened. All I/O is local. No telemetry.
    Future hardening options (not in v0): an "iMessage-exposed" session class with a marker file the bridge can filter on; per-tool confirmation round-trip before sensitive actions.
 
 7. **Cost-exhaustion within caps.** An allowlisted attacker can burn the daily cap in roughly 60 seconds at the default 10 replies/min rate-limit and ~$0.044/call hermetic cost. Bounded loss, acknowledged. Lowering `daily_cost_cap_usd` or `reply_rate_limit_per_minute` is the user's lever.
+
+8. **Per-message `cost_cents` in audit_log is a coarse length side-channel.** Per-row `cost_cents` (Phase D schema v1) correlates with prompt+reply token count, which correlates with content length. An attacker who exfiltrates state.db sees a column they can sort to identify "the long one" / "the data dump" etc. Combined with timestamps this is a re-identification side channel for what got discussed. We accept the trade-off: bucketing or zeroing the column would destroy the spending-forensics queries that are the column's reason to exist (see `docs/AUDIT_LOG_COOKBOOK.md`). state.db is already documented as sensitive (S8); the user controls its exposure.
+
+9. **`_redact_handle` preserves the email domain verbatim.** `sa***@example.com` masks the local-part but keeps the domain. Rare or unique domains make this re-identifying. We accept the trade-off because the operator needs to read their own audit log to map redacted handles back to contacts; hashing the domain breaks that. Users on shared or company domains get more redaction than users on personal domains — a known asymmetry.
+
+10. **Selftest verifies Bash specifically, not every other denied tool.** `selftest_bash_denied` checks the load-bearing case. A future Claude Code release that selectively allows e.g. `Write` while keeping Bash denied would slip through. The selftest is intentionally narrow to keep cost and runtime predictable; the rest of the deny list relies on `--disallowed-tools` semantics holding. If you suspect drift, extend the selftest before opting any new tool into `allowed_tools`.
 
 ## Pre-public-release gates
 

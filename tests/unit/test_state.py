@@ -318,6 +318,83 @@ def test_schema_too_new_refused(state_dir: Path):
         state.init_state_dir(state_dir)
 
 
+def test_apply_schema_is_idempotent(state_dir: Path):
+    """Running init_state_dir twice in a row must not raise and must
+    leave the schema in the same state."""
+    state.init_state_dir(state_dir)
+    state.init_state_dir(state_dir)
+    with state.connection(state_dir) as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert {"chatdb_rowid", "cost_cents", "error_category"} <= cols
+    assert version == state.SCHEMA_VERSION
+
+
+def test_pragma_integrity_check_after_migration(state_dir: Path):
+    """SQLite integrity_check must return 'ok' after init."""
+    state.init_state_dir(state_dir)
+    with state.connection(state_dir) as conn:
+        result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    assert result == "ok"
+
+
+def test_schema_partial_migration_recovers(state_dir: Path):
+    """A v0 DB where ONE of the new columns somehow already exists
+    (simulates a crash mid-migration) must still complete the migration
+    without raising "duplicate column"."""
+    import sqlite3
+
+    db_path = state_dir / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript("""
+            CREATE TABLE audit_log (
+                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                handle_redacted TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                detail TEXT,
+                reply_bytes INTEGER,
+                chatdb_rowid INTEGER  -- one of the new columns already exists
+            );
+            CREATE TABLE cursor (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            CREATE TABLE conversations (
+                handle TEXT PRIMARY KEY, current_session_id TEXT,
+                last_options_json TEXT, last_options_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE reply_counter (
+                bucket TEXT NOT NULL, handle TEXT NOT NULL,
+                n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (bucket, handle)
+            );
+            CREATE TABLE daily_cost (
+                date_utc TEXT PRIMARY KEY, cents INTEGER NOT NULL DEFAULT 0
+            );
+            PRAGMA user_version = 0;
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Must NOT raise "duplicate column chatdb_rowid".
+    state.init_state_dir(state_dir)
+    with state.connection(state_dir) as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    assert {"chatdb_rowid", "cost_cents", "error_category"} <= cols
+
+
+def test_schema_migration_missing_raises(state_dir: Path, monkeypatch):
+    """Bump SCHEMA_VERSION above what _apply_schema knows; an existing
+    v1 DB should hit the no-registered-migration path and raise
+    SchemaMigrationMissing (rather than silently stamping forward)."""
+    state.init_state_dir(state_dir)  # stamps to v1
+    # Pretend the code is now v2 with no v1→v2 migration registered.
+    monkeypatch.setattr(state, "SCHEMA_VERSION", state.SCHEMA_VERSION + 1)
+    with pytest.raises(state.SchemaMigrationMissing):
+        state.init_state_dir(state_dir)
+
+
 def test_schema_migration_from_v0_adds_columns(state_dir: Path):
     """An existing v0 DB (no new columns, user_version=0) must migrate forward."""
     import sqlite3

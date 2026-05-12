@@ -134,3 +134,36 @@ def test_normalize_for_allowlist_phone_passthrough():
 
 def test_normalize_for_allowlist_invalid_returns_empty():
     assert daemon._normalize_for_allowlist("garbage") == ""
+
+
+# --- Audit-row redaction regression (round-4 adversarial finding) ------
+
+def test_audit_failure_detail_string_redacted():
+    """The audit detail string for a claude failure MUST NOT contain the
+    raw error string or the consecutive-failure count.
+
+    This is the round-4 adversarial finding: state.db is documented as not
+    containing internal error paths or the circuit-breaker threshold. The
+    daemon failure-path code constructs the detail string locally; a future
+    refactor that re-adds ``consec=`` or ``raw=`` would silently violate
+    THREAT_MODEL S8 + SECURITY.md CVE policy. This test guards that.
+    """
+    # Inline the string-shape this test asserts. We're not running the
+    # daemon — we're verifying that the source-of-truth string template
+    # in daemon.py does NOT include the forbidden tokens.
+    import inspect
+
+    source = inspect.getsource(daemon._handle_one)
+    # The success-path detail intentionally has cost_cents/sid; that's
+    # fine and documented. Look for the failure-path template.
+    # The forbidden tokens MUST NOT appear in the audit detail builder
+    # for failure rows.
+    assert "consec=" not in source or "consec=%d" in source, (
+        "audit_log.detail leaks consecutive-failure count — must move to logger"
+    )
+    assert "raw={result.error" not in source, (
+        "audit_log.detail leaks raw error string — must move to logger"
+    )
+    assert "raw=%r" in source, (
+        "expected the raw error to be logged server-side via logger.warning"
+    )

@@ -6,16 +6,23 @@ This survives logout but NOT reboot until login (which is what you want
 
 ## ⚠️ Read before you do this
 
-- The launchd process inherits **Full Disk Access** from whatever you
-  granted in `System Settings → Privacy & Security → Full Disk Access`.
-  You almost certainly want to grant FDA to `/usr/bin/python3` or the
-  specific Python you launch with, **not** to launchd itself. If FDA is
-  granted to "Terminal," foreground runs will work but a launchd run
-  won't — they're different processes.
-- AppleScript send requires **Automation > Messages** for the launching
-  process. If Terminal already has this, the launchd python will need
-  the same grant. macOS prompts on first send if a Terminal session of
-  yours has the grant.
+- FDA is **per-binary**. Grant Full Disk Access to the *exact* Python
+  binary you launch with — find it with `which python3.11` and pass
+  the full resolved path to `System Settings → Privacy & Security →
+  Full Disk Access → +`. The plist example below uses
+  `/opt/homebrew/bin/python3.11` (Homebrew on Apple Silicon); yours may
+  be `/usr/local/bin/python3.11` (Homebrew on Intel) or
+  `/opt/local/bin/python3.11` (MacPorts). FDA granted to Terminal does
+  NOT extend to a launchd-spawned python — they are different
+  processes from the OS's perspective.
+- AppleScript send requires **Automation > Messages** for the same
+  launching binary. macOS prompts on first send.
+- The bridge needs Claude auth (one of `ANTHROPIC_API_KEY` or
+  `CLAUDE_CODE_OAUTH_TOKEN`) in its environment. launchd does NOT
+  inherit your shell env, so the plist must provide it — see
+  `EnvironmentVariables` below. Without this, every claude call fails
+  and operators see the canned "Couldn't run Claude" message with no
+  hint why.
 - The launchd-managed daemon writes `~/.claude-imessage-bridge/status.json`
   every heartbeat (5 min by default). Stale `status.json` is the fastest
   way to detect a hung daemon.
@@ -69,10 +76,21 @@ This survives logout but NOT reboot until login (which is what you want
 
        <!-- Environment scrub the daemon does internally is one layer; -->
        <!-- pass only what's needed at launch. -->
+       <!-- ⚠ DO NOT commit a plist with the OAuth token inlined. -->
+       <!-- Safer pattern: use `launchctl setenv CLAUDE_CODE_OAUTH_TOKEN -->
+       <!--   "$(security find-generic-password -s claude-code -w)"` -->
+       <!-- in a login hook, then reference it here via $CLAUDE_CODE_OAUTH_TOKEN. -->
        <key>EnvironmentVariables</key>
        <dict>
            <key>PATH</key>
            <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+           <!-- Pick ONE auth path. Prefer the OAuth token over the API key. -->
+           <key>CLAUDE_CODE_OAUTH_TOKEN</key>
+           <string><!-- token here, OR remove and use launchctl setenv --></string>
+           <!--
+           <key>ANTHROPIC_API_KEY</key>
+           <string><!- alternative auth -></string>
+           -->
        </dict>
 
        <!-- Do NOT set Crashed mode aggressively; the circuit breaker -->

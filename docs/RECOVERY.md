@@ -3,6 +3,17 @@
 What to do when the bridge is in a bad state. Most "stuck" scenarios are
 solved by removing one file and restarting.
 
+> ⚠ **Back up `state.db` before any destructive operation.** Audit history,
+> conversation session pointers, and the cursor all live in it. Lost audit
+> history is a forensic gap (SECURITY.md treats it as CVE-warranting).
+>
+> ```bash
+> cp ~/.claude-imessage-bridge/state.db \
+>    ~/.claude-imessage-bridge/state.db.bak.$(date +%s)
+> ```
+>
+> Every `rm state.db` instruction below assumes you ran this first.
+
 ## Daemon won't start: selftest failure
 
 **Symptom:**
@@ -31,9 +42,12 @@ the code. Either re-upgrade or wipe state.db (you'll lose audit history).
 
 **Action:**
 ```bash
-# Option A: Re-upgrade the bridge code.
+# Option A: Re-upgrade the bridge code (preferred).
 git pull
+
 # Option B: Reset state (loses cursor + audit + sessions).
+cp ~/.claude-imessage-bridge/state.db \
+   ~/.claude-imessage-bridge/state.db.bak.$(date +%s)
 rm ~/.claude-imessage-bridge/state.db
 # On next start, the daemon will seed cursor at chat.db MAX(rowid).
 ```
@@ -128,9 +142,12 @@ Run with the daemon **stopped** (state.db locks otherwise).
 sqlite3 ~/.claude-imessage-bridge/state.db "PRAGMA integrity_check;"
 ```
 
-If this returns anything but `ok`, the safest path is to back up and reset:
+If this returns anything but `ok`, the safest path is to back up (you
+already did, right?) and reset:
 
 ```bash
+# The cp above this section already created a backup. Now move the
+# corrupt copy aside (so a future forensic dump can read it).
 mv ~/.claude-imessage-bridge/state.db ~/.claude-imessage-bridge/state.db.corrupt.$(date +%s)
 python3 -m src.daemon --reset-cursor  # fresh DB, fresh cursor
 ```
