@@ -46,9 +46,10 @@ logger = logging.getLogger(__name__)
 # Default location for the Claude Code CLI. Preflight verifies it exists.
 DEFAULT_CLAUDE_BIN: Final = "/usr/local/bin/claude"
 
-# Tools the bridge will NEVER allow regardless of config. Belt-and-suspenders
-# above the user-tunable forbidden list. Adding to this set requires editing
-# THIS constant — deliberate friction point.
+# Tools the bridge will NEVER allow in ``allowed_tools``. If a user tries to
+# add any of these to config.yaml, the daemon refuses to start. This is the
+# config-layer floor — see HARD_DISALLOWED below for what we actually pass
+# to ``--disallowed-tools``.
 HARD_FORBIDDEN_TOOLS: Final = frozenset({
     "Bash",
     "Write",
@@ -58,7 +59,48 @@ HARD_FORBIDDEN_TOOLS: Final = frozenset({
     "WebFetch",
     "WebSearch",
     "Skill",
+    "Agent",
+    "ToolSearch",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "CronToggle",
+    "ScheduleWakeup",
+    "RemoteTrigger",
+    "PushNotification",
+    "EnterWorktree",
+    "ExitWorktree",
     # MCP-namespaced tools blocked via prefix check, not exact match.
+})
+
+# Tools the bridge ACTIVELY tells claude to disallow on every invocation, via
+# ``--disallowed-tools``. ``--allowed-tools`` is additive (doesn't deny
+# anything by itself), so this list is the real security boundary. Bash and
+# friends are still available in ``claude -p`` by default unless explicitly
+# denied here.
+#
+# Anything in allowed_tools is removed from this set at invocation time, so
+# a user who opts in to (e.g.) ``Read`` gets Read while everything else
+# stays denied.
+HARD_DISALLOWED: Final = frozenset({
+    # Filesystem write / exec
+    "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    # Filesystem read (cwd-scoped but still surfaces filenames/contents)
+    "Read", "Grep", "Glob", "LS", "NotebookRead",
+    # Network egress
+    "WebFetch", "WebSearch",
+    # Tool/skill/agent loading — these can re-enable denied tools transitively
+    "Skill", "Agent", "ToolSearch",
+    # Scheduling — could persist arbitrary execution
+    "CronCreate", "CronDelete", "CronList", "CronToggle", "ScheduleWakeup",
+    # Communication / out-of-band
+    "AskUserQuestion", "RemoteTrigger", "PushNotification",
+    # Task / state / plan modes
+    "TodoWrite", "TaskStop", "TaskOutput",
+    "EnterWorktree", "ExitWorktree", "EnterPlanMode", "ExitPlanMode",
+    # MCP introspection (the empty mcp config should make these inert, but
+    # we deny anyway — defense in depth)
+    "ListMcpResourcesTool", "ReadMcpResourceTool",
 })
 
 # argv tokens that, if present anywhere in argv, mean an unsafe invocation.
@@ -79,18 +121,24 @@ ARGV_DENYLIST: Final = frozenset({
 # at 16KB; this is a second layer.
 MAX_PROMPT_BYTES: Final = 32 * 1024
 
-# Minimal system prompt injected via --append-system-prompt. Sets a tight
-# role so the model doesn't try to reference Gmail/Slack/Drive/etc. that
-# the user's global CLAUDE.md would otherwise have made it think it has.
+# Minimal system prompt injected via --append-system-prompt. Three jobs:
+# 1. Set a tight role so the model doesn't reference Gmail/Slack/Drive/etc.
+# 2. Tell the model explicitly that it has NO tools and shouldn't try to
+#    fabricate tool calls (observed behavior: in fully-disallowed mode the
+#    model sometimes emits fake ``<tool_call>`` blocks with hallucinated
+#    output rather than admitting it has no tools).
+# 3. Cap reply length close to the iMessage transport cap.
 BRIDGE_SYSTEM_PROMPT: Final = (
-    "You are a read-only chat assistant reached over iMessage. "
-    "You have no access to email, Slack, Drive, calendars, contacts, "
-    "MCP servers, skills, project files, or any user-specific memory. "
-    "Do not reference customers, deals, projects, or personal context — "
-    "that information is not available here. Available tools (if any) "
-    "are listed by the caller; assume nothing else. Keep replies under "
-    "1500 characters. If a request requires capabilities you don't have, "
-    "say so plainly and stop."
+    "You are a text-only chat assistant reached over iMessage. "
+    "You have NO tools — no Bash, no Read, no Write, no WebFetch, "
+    "no Skill, no Agent, nothing. Do NOT fabricate tool calls. Do NOT "
+    "emit <tool_call> tags. Do NOT pretend to read files or run commands. "
+    "If a request requires a tool, refuse plainly: say you have no tools "
+    "available in this environment. "
+    "You also have no access to email, Slack, Drive, calendars, contacts, "
+    "MCP servers, or any user-specific memory. Do not reference customers, "
+    "deals, projects, or personal context — that information is not "
+    "available here. Keep replies under 1500 characters."
 )
 
 # Environment variables the child inherits. Everything else is dropped.
@@ -200,9 +248,19 @@ def run_claude(
     if len(encoded) > MAX_PROMPT_BYTES:
         prompt = encoded[:MAX_PROMPT_BYTES].decode("utf-8", errors="ignore")
 
-    # ``--tools ""`` is the documented way to disable all built-in tools.
-    # When the user provides explicit tools, those replace the empty string.
-    tools_value = ",".join(allowed_tools) if allowed_tools else ""
+    # Build the actual deny list passed to claude. HARD_DISALLOWED minus
+    # anything the user explicitly opted into. ``--disallowed-tools`` is the
+    # REAL deny mechanism in ``claude -p`` — ``--allowed-tools`` only ADDS
+    # patterns to the allow-set, it doesn't remove anything. Bash and
+    # friends are available by default unless explicitly denied.
+    effective_disallow = HARD_DISALLOWED - set(allowed_tools)
+    disallow_value = ",".join(sorted(effective_disallow))
+
+    # ``--allowed-tools`` carries the user's opt-in additions. If empty,
+    # we still pass it as "" so Claude doesn't widen the allow-set with its
+    # defaults. NB: per testing, --allowed-tools "" alone does NOT deny
+    # tools — that's why HARD_DISALLOWED above does the actual work.
+    allow_value = ",".join(allowed_tools) if allowed_tools else ""
 
     argv = [
         claude_bin,
@@ -210,7 +268,8 @@ def run_claude(
         "--output-format", "json",
         "--strict-mcp-config",
         "--mcp-config", str(mcp_config_path),
-        "--tools", tools_value,
+        "--disallowed-tools", disallow_value,
+        "--allowed-tools", allow_value,
         "--max-turns", str(int(max_turns)),
         "--append-system-prompt", BRIDGE_SYSTEM_PROMPT,
         # ``--`` is REQUIRED: prevents a prompt that begins with ``--`` from
@@ -222,8 +281,13 @@ def run_claude(
     _assert_safe_argv(argv)
 
     logger.info(
-        "claude -p (sandbox_cwd=%s, tools=%r, max_turns=%d, prompt_bytes=%d)",
-        sandbox_cwd, tools_value, max_turns, len(prompt.encode("utf-8")),
+        "claude -p (sandbox_cwd=%s, allow=%r, disallow_count=%d, "
+        "max_turns=%d, prompt_bytes=%d)",
+        sandbox_cwd,
+        allow_value,
+        len(effective_disallow),
+        max_turns,
+        len(prompt.encode("utf-8")),
     )
     start = time.time()
 
@@ -333,4 +397,76 @@ def run_claude(
         session_id=session_id,
         cost_usd=cost_usd,
         duration_ms=duration,
+    )
+
+
+# --- Startup self-test ----------------------------------------------------
+
+class SelfTestFailed(RuntimeError):
+    """Raised when the startup self-test cannot prove Bash is denied."""
+
+
+def selftest_bash_denied(
+    *,
+    sandbox_cwd: Path,
+    mcp_config_path: Path,
+    claude_bin: str = DEFAULT_CLAUDE_BIN,
+    timeout_seconds: int = 60,
+) -> None:
+    """Ask claude to invoke Bash; refuse to proceed unless it was denied.
+
+    Empirical proof that this build's tool-disallow incantation is still
+    correct. Anthropic could in principle change CLI semantics or add new
+    tools in a future release; the self-test catches that the next time
+    the daemon boots.
+
+    The canary path is in the sandbox so even if the test FALSELY succeeds
+    (claude lies, file actually gets written somehow), it lands in a known
+    location we can clean up.
+    """
+    canary = sandbox_cwd / "_selftest_canary.txt"
+    if canary.exists():
+        canary.unlink()
+
+    test_prompt = (
+        f"Use the Bash tool right now to run: "
+        f"echo SELFTEST_FAIL > {canary}. "
+        f"Then read it back. Report exactly what happened."
+    )
+    result = run_claude(
+        test_prompt,
+        sandbox_cwd=sandbox_cwd,
+        mcp_config_path=mcp_config_path,
+        allowed_tools=[],
+        max_turns=4,
+        timeout_seconds=timeout_seconds,
+        claude_bin=claude_bin,
+    )
+
+    canary_present = canary.exists()
+    if canary_present:
+        # Clean up before raising so we don't leave a misleading file.
+        try:
+            canary.unlink()
+        except OSError:
+            pass
+        raise SelfTestFailed(
+            "Bash WAS executed via claude despite --disallowed-tools — "
+            "the Phase B security boundary is NOT holding. Refusing to "
+            "start the daemon. Tool-deny config may have drifted in a "
+            "Claude Code version bump. Reply text was: "
+            f"{result.reply[:200]!r}"
+        )
+
+    if not result.success:
+        # Couldn't even run the test — refuse, force a human look.
+        raise SelfTestFailed(
+            f"Self-test couldn't complete: {result.error}. "
+            "Refusing to start; cannot verify Bash is denied."
+        )
+
+    # Belt-and-suspenders: log the cost so we can see selftest spend.
+    logger.info(
+        "selftest: bash denied (canary absent, cost=$%.4f, duration=%dms)",
+        result.cost_usd, result.duration_ms,
     )

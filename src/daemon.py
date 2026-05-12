@@ -430,6 +430,30 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("preflight failed: %s", e)
         return 3
 
+    # Empirical self-test: spawn one claude -p and try to invoke Bash.
+    # Refuse to run the bridge if Bash IS executable, regardless of what
+    # our config flags say. This is the only way to verify the tool-deny
+    # boundary still holds across Claude Code version changes — the
+    # documented flag semantics drifted at least once already (see
+    # adversarial round 3 findings).
+    logger.info("running selftest: verifying Bash denial under current config…")
+    try:
+        claude_runner.selftest_bash_denied(
+            sandbox_cwd=state.sandbox_dir(state_dir),
+            mcp_config_path=state.mcp_config_path(state_dir),
+            claude_bin=cfg.claude_binary,
+            timeout_seconds=min(cfg.per_call_timeout_seconds, 60),
+        )
+    except claude_runner.SelfTestFailed as e:
+        logger.error("SECURITY SELF-TEST FAILED: %s", e)
+        return 4
+    except FileNotFoundError as e:
+        logger.error("selftest setup error (claude binary?): %s", e)
+        return 4
+    except Exception as e:
+        logger.exception("selftest crashed: %s", e)
+        return 4
+
     logger.info(
         "starting bridge: project_dir=%s allowlist=%d entries debug=%s",
         cfg.project_directory,

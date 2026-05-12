@@ -22,22 +22,34 @@ allowlist:
 # Anyone in an opted-in group can drive the bot — be conservative.
 allow_group_chat_guids: []
 
-# What Claude is allowed to do via this surface.
+# Tools Claude is allowed to USE on inbound messages.
 #
-# DEFAULT IS EMPTY — text-only chat. No filesystem access. This is the
-# only setting that's safe by default given the iMessage threat model:
-# any filesystem-reading tool (Read, Grep, Glob, LS) can be coerced via
+# DEFAULT IS EMPTY — text-only chat. No filesystem access.
+#
+# How the security model actually works (this is critical to understand):
+# - Claude Code's `--allowed-tools` flag is ADDITIVE — it doesn't deny
+#   anything by itself. Bash, Read, Write, WebFetch etc. are available
+#   in `claude -p` BY DEFAULT unless explicitly denied.
+# - The bridge passes a comprehensive `--disallowed-tools` list on every
+#   invocation. That's what actually keeps Bash unavailable.
+# - On every daemon startup, a SELFTEST tries to invoke Bash and refuses
+#   to run the bridge unless Bash is empirically denied. If a future
+#   Claude Code version changes flag semantics, the daemon stops working
+#   until the disallow list is updated.
+# - Tools you put in `allowed_tools` here are REMOVED from the active
+#   disallow list, so you can opt in to (e.g.) `Read` if you want.
+#
+# Why empty by default: any filesystem-reading tool can be coerced via
 # prompt injection into echoing arbitrary file contents back over
 # iMessage, and that reply lands on every Apple-ID-signed-in device
 # (including potentially family-shared ones).
 #
-# If you understand and accept the trade-off, you can add tools below.
-# Recommended additions: NONE for v0. Try the bridge with empty list
-# first, decide later.
-#
 # Tools that are HARD-FORBIDDEN regardless of what you put here:
 # Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch,
-# Skill, and any mcp__* tool. Daemon refuses to start if you list them.
+# Skill, Agent, ToolSearch, CronCreate, CronDelete, CronList, CronToggle,
+# ScheduleWakeup, RemoteTrigger, PushNotification, EnterWorktree,
+# ExitWorktree, and any mcp__* tool. Daemon refuses to start if you
+# list any of those.
 allowed_tools: []
 
 # Tools that are always denied at the config layer, on top of the
