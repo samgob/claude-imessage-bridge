@@ -1,0 +1,25 @@
+[project]
+name = "claude-imessage-bridge"
+version = "0.0.1.dev0"
+description = "Two-way Claude Code over iMessage with per-conversation session routing (macOS)."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "pyyaml>=6.0,<7.0",
+]
+
+[project.scripts]
+imessage-bridge = "src.daemon:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.ruff]
+line-length = 100

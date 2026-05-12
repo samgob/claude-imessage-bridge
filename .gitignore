@@ -1,0 +1,39 @@
+# Secrets / runtime state — NEVER commit
+.env
+.env.*
+!.env.example
+config.yaml
+config.yml
+!config.example.yaml
+state.db
+state.db-*
+*.sqlite
+*.sqlite-*
+logs/
+samples/
+*.chat.db
+chat.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~

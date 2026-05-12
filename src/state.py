@@ -1,0 +1,318 @@
+"""Persistent state for the bridge: cursor, conversations, audit log.
+
+Lives at ``~/.claude-imessage-bridge/state.db`` (SQLite). The directory and
+the DB file are created with mode 0o700/0o600 so other local users can't
+read it — see threat model N8 (state.db unprotected).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator, Optional
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_STATE_DIR = Path.home() / ".claude-imessage-bridge"
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cursor (
+    name TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    handle TEXT PRIMARY KEY,
+    current_session_id TEXT,
+    last_options_json TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    handle_redacted TEXT NOT NULL,
+    direction TEXT NOT NULL,      -- 'in' or 'out'
+    kind TEXT NOT NULL,           -- 'command' / 'text' / 'reply' / 'drop'
+    detail TEXT,                  -- never raw body unless debug mode
+    reply_bytes INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS reply_counter (
+    -- per-(handle, minute-bucket) reply counts for rate limiting
+    bucket TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    n INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket, handle)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_reply_counter_bucket ON reply_counter(bucket);
+"""
+
+
+def _secure_open_db(path: Path) -> sqlite3.Connection:
+    """Open or create state.db with 0o600 perms.
+
+    If the file doesn't exist, create it and immediately chmod. If it exists
+    but has loose perms, tighten them (warn the user).
+    """
+    new_file = not path.exists()
+    conn = sqlite3.connect(str(path), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        if new_file:
+            os.chmod(path, 0o600)
+        else:
+            current_mode = path.stat().st_mode & 0o777
+            if current_mode & 0o077:
+                logger.warning(
+                    "state.db at %s had mode %o; tightening to 0600",
+                    path,
+                    current_mode,
+                )
+                os.chmod(path, 0o600)
+    except OSError as e:
+        logger.warning("Could not chmod state.db: %s", e)
+    return conn
+
+
+def init_state_dir(state_dir: Path = DEFAULT_STATE_DIR) -> Path:
+    """Create the state directory with restrictive perms and init schema.
+
+    Returns the state.db Path.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(state_dir, 0o700)
+    except OSError as e:
+        logger.warning("Could not chmod state dir: %s", e)
+    db_path = state_dir / "state.db"
+    conn = _secure_open_db(db_path)
+    try:
+        conn.executescript(_SCHEMA)
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+@contextmanager
+def connection(state_dir: Path = DEFAULT_STATE_DIR) -> Iterator[sqlite3.Connection]:
+    """Context-managed connection that auto-commits on success."""
+    db_path = state_dir / "state.db"
+    if not db_path.exists():
+        init_state_dir(state_dir)
+    conn = _secure_open_db(db_path)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_cursor(name: str, default: int = 0, *, state_dir: Path = DEFAULT_STATE_DIR) -> int:
+    with connection(state_dir) as conn:
+        row = conn.execute("SELECT value FROM cursor WHERE name = ?", (name,)).fetchone()
+        return int(row["value"]) if row else default
+
+
+class CursorRegression(RuntimeError):
+    """Raised when set_cursor would move a cursor backward without an override."""
+
+
+def set_cursor(
+    name: str,
+    value: int,
+    *,
+    state_dir: Path = DEFAULT_STATE_DIR,
+    allow_regression: bool = False,
+) -> None:
+    """Set a cursor value.
+
+    By default refuses to move a cursor strictly backward — protects against
+    a restored backup of state.db replaying messages and against accidental
+    overwrites. Use ``allow_regression=True`` for explicit ``--reset-cursor``
+    operator commands. The regression attempt is logged loudly either way.
+    """
+    new_value = int(value)
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT value FROM cursor WHERE name = ?", (name,)
+        ).fetchone()
+        if row is not None:
+            current = int(row["value"])
+            if new_value < current:
+                logger.warning(
+                    "cursor %s regression: current=%d new=%d allow_regression=%s",
+                    name,
+                    current,
+                    new_value,
+                    allow_regression,
+                )
+                if not allow_regression:
+                    raise CursorRegression(
+                        f"cursor {name!r}: refusing to move from {current} "
+                        f"to {new_value}; pass allow_regression=True to override"
+                    )
+        conn.execute(
+            "INSERT INTO cursor (name, value) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            (name, new_value),
+        )
+
+
+def get_current_session(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> Optional[str]:
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT current_session_id FROM conversations WHERE handle = ?",
+            (handle,),
+        ).fetchone()
+        return row["current_session_id"] if row else None
+
+
+def set_current_session(
+    handle: str, session_id: Optional[str], *, state_dir: Path = DEFAULT_STATE_DIR
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO conversations (handle, current_session_id, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(handle) DO UPDATE SET "
+            "current_session_id = excluded.current_session_id, "
+            "updated_at = excluded.updated_at",
+            (handle, session_id, now),
+        )
+
+
+def set_last_options(
+    handle: str, options: list, *, state_dir: Path = DEFAULT_STATE_DIR
+) -> None:
+    """Stash the numbered options shown to the user (for /pick N)."""
+    now = datetime.now(timezone.utc).isoformat()
+    payload = json.dumps(options) if options else None
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO conversations (handle, last_options_json, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(handle) DO UPDATE SET "
+            "last_options_json = excluded.last_options_json, "
+            "updated_at = excluded.updated_at",
+            (handle, payload, now),
+        )
+
+
+def get_last_options(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> list:
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT last_options_json FROM conversations WHERE handle = ?",
+            (handle,),
+        ).fetchone()
+        if not row or not row["last_options_json"]:
+            return []
+        try:
+            return json.loads(row["last_options_json"])
+        except json.JSONDecodeError:
+            return []
+
+
+def audit(
+    *,
+    handle_redacted: str,
+    direction: str,
+    kind: str,
+    detail: Optional[str] = None,
+    reply_bytes: Optional[int] = None,
+    state_dir: Path = DEFAULT_STATE_DIR,
+) -> None:
+    """Append one audit row.
+
+    ``detail`` should NOT contain raw message bodies in normal mode — the
+    daemon's debug flag controls whether bodies are passed in. Defaults
+    pass commands (e.g., "/sessions"), classification labels, or short
+    structured summaries.
+    """
+    ts = datetime.now(timezone.utc).isoformat()
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO audit_log (ts, handle_redacted, direction, kind, "
+            "detail, reply_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, handle_redacted, direction, kind, detail, reply_bytes),
+        )
+
+
+# --- Rate limiting --------------------------------------------------------
+
+def _bucket(ts: float = None) -> str:
+    """Minute-bucket key. Same minute -> same key."""
+    ts = ts if ts is not None else time.time()
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d%H%M")
+
+
+def reply_count_this_minute(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> int:
+    bucket = _bucket()
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT n FROM reply_counter WHERE bucket = ? AND handle = ?",
+            (bucket, handle),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def reserve_reply_slot(
+    handle: str,
+    limit: int,
+    *,
+    state_dir: Path = DEFAULT_STATE_DIR,
+) -> tuple[bool, int]:
+    """Atomically reserve a per-minute reply slot for ``handle``.
+
+    Returns ``(granted, new_count)``. If granted is False, the caller MUST
+    NOT send — they've already been counted but we're at/over the limit, so
+    we roll the increment back. This pattern closes the TOCTOU window in
+    the check-then-act sequence the prior implementation had.
+    """
+    bucket = _bucket()
+    with connection(state_dir) as conn:
+        # Single transaction: increment, observe, conditionally roll back.
+        conn.execute(
+            "INSERT INTO reply_counter (bucket, handle, n) VALUES (?, ?, 1) "
+            "ON CONFLICT(bucket, handle) DO UPDATE SET n = n + 1",
+            (bucket, handle),
+        )
+        row = conn.execute(
+            "SELECT n FROM reply_counter WHERE bucket = ? AND handle = ?",
+            (bucket, handle),
+        ).fetchone()
+        new_count = int(row["n"])
+        if new_count > limit:
+            # Roll back the increment so other callers see accurate state.
+            conn.execute(
+                "UPDATE reply_counter SET n = n - 1 "
+                "WHERE bucket = ? AND handle = ?",
+                (bucket, handle),
+            )
+            return (False, new_count - 1)
+        return (True, new_count)
+
+
+def prune_reply_counter(*, keep_buckets: int = 10, state_dir: Path = DEFAULT_STATE_DIR) -> None:
+    """Drop rate-limit buckets older than ``keep_buckets`` minutes.
+
+    Called occasionally by the daemon to keep state.db small.
+    """
+    threshold = datetime.fromtimestamp(time.time() - keep_buckets * 60, tz=timezone.utc)
+    cutoff = threshold.strftime("%Y%m%d%H%M")
+    with connection(state_dir) as conn:
+        conn.execute("DELETE FROM reply_counter WHERE bucket < ?", (cutoff,))

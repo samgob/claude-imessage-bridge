@@ -1,0 +1,59 @@
+# claude-imessage-bridge — config
+#
+# Copy to ~/.claude-imessage-bridge/config.yaml and fill in the blanks.
+# That path is in .gitignore by default; this example is.
+
+# Absolute path to where Claude Code sessions should run. Typically your
+# main work directory (the one Claude Desktop opens to). The bridge will
+# spawn `claude` with this as cwd.
+project_directory: /Users/YOU/Desktop/Claude Homebase
+
+# Senders allowed to drive the bot. Use Apple ID email (preferred — strong
+# auth) or E.164 phone numbers. Phone entries are also safe because we
+# only accept service='iMessage' rows (SMS is dropped at the SQL layer),
+# but Apple ID emails are slightly stronger because they're tied to one
+# identity that can't be ported.
+allowlist:
+  - "you@example.com"
+  # - "+15551234567"
+
+# Group chats are refused by default. To opt one in, paste its GUID here
+# (find via: SELECT guid FROM chat WHERE display_name LIKE '%family%';).
+# Anyone in an opted-in group can drive the bot — be conservative.
+allow_group_chat_guids: []
+
+# What Claude is allowed to do via this surface. Defaults are deliberately
+# minimal — read-only filesystem inspection. NO `WebFetch`, NO `Skill`,
+# NO `Bash`. Both are easy exfiltration vectors via prompt injection.
+# Add them at your own risk.
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - LS
+
+# Tools that are always denied, even if added to allowed_tools by mistake.
+# Belt-and-suspenders.
+forbidden_tools:
+  - Bash
+  - Write
+  - Edit
+  - MultiEdit
+  - NotebookEdit
+  # NB: WebFetch and Skill are NOT in the default forbidden list because
+  # we want users to make a deliberate choice to add them to allowed.
+  # If you want hard-block, put them here.
+
+# How often to poll chat.db (seconds). >= 1.0.
+poll_interval_seconds: 3.0
+
+# Reply rate limit per minute, per sending handle. Prevents a compromised
+# allowlisted contact from burning your cost cap in seconds.
+reply_rate_limit_per_minute: 10
+
+# Hard daily $ cap on Claude API spend tracked across all conversations.
+daily_cost_cap_usd: 5.00
+
+# Log message bodies (incoming and outgoing) to the audit log. OFF by
+# default — leaks content into logs that may end up in backups.
+debug: false
