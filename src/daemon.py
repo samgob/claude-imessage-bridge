@@ -33,6 +33,7 @@ from typing import Optional
 from . import claude_runner
 from . import commands as commands_mod
 from . import config as config_mod
+from . import health
 from . import imessage_reader
 from . import imessage_sender
 from . import state
@@ -188,6 +189,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         direction="in",
         kind=("drop" if not accept else _classify(msg.body)),
         detail=reason,
+        chatdb_rowid=msg.rowid,
     )
     if cfg.debug:
         logger.warning(
@@ -216,6 +218,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             direction="out",
             kind="drop",
             detail="rate-limited",
+            chatdb_rowid=msg.rowid,
         )
         return
 
@@ -234,6 +237,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             state.audit(
                 handle_redacted=redacted, direction="out", kind="drop",
                 detail=f"cmd-error:{type(e).__name__}",
+                chatdb_rowid=msg.rowid,
             )
             return
 
@@ -251,6 +255,8 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
                 handle_redacted=redacted, direction="out", kind="reply",
                 detail=f"cmd={msg.body.split()[0]}",
                 reply_bytes=len(cmd_result.reply.encode("utf-8")),
+                chatdb_rowid=msg.rowid,
+                cost_cents=0,
             )
         except imessage_sender.SendError as e:
             _metrics["send_errors"] += 1
@@ -258,6 +264,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             state.audit(
                 handle_redacted=redacted, direction="out", kind="drop",
                 detail=f"cmd-send-error:{type(e).__name__}",
+                chatdb_rowid=msg.rowid,
             )
         return
 
@@ -289,6 +296,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             direction="out",
             kind="drop",
             detail="daily-cap-reached",
+            chatdb_rowid=msg.rowid,
         )
         return
 
@@ -343,6 +351,8 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             direction="out",
             kind="drop",
             detail=f"per-call-cap dur={result.duration_ms}ms cents={cents}",
+            chatdb_rowid=msg.rowid,
+            cost_cents=cents,
         )
         try:
             imessage_sender.send(
@@ -413,6 +423,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             kind=kind,
             detail=detail,
             reply_bytes=len(reply_body.encode("utf-8")),
+            chatdb_rowid=msg.rowid,
+            cost_cents=cents,
+            error_category=result.error_category,
         )
     except imessage_sender.SendError as e:
         _metrics["send_errors"] += 1
@@ -422,6 +435,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             direction="out",
             kind="drop",
             detail=f"send-error:{type(e).__name__}",
+            chatdb_rowid=msg.rowid,
+            cost_cents=cents,
+            error_category=result.error_category,
         )
 
 
@@ -440,12 +456,33 @@ def _stop_requested(state_dir: Path) -> bool:
     return False
 
 
-def _heartbeat() -> None:
-    """Periodic summary log line. Captures the metric counters and resets."""
+def _heartbeat(
+    *,
+    state_dir: Optional[Path] = None,
+    cursor: int = 0,
+    cfg=None,
+    paused: bool = False,
+    stop_requested: bool = False,
+) -> None:
+    """Periodic summary log line + status.json sidecar.
+
+    Captures and resets the metric counters; takes a snapshot in
+    ``status.json`` so external monitors (``cimb-status``, shell scripts,
+    cron-driven health checks) can see liveness without scraping logs.
+    """
     snapshot = dict(_metrics)
     _metrics.clear()
     parts = " ".join(f"{k}={v}" for k, v in sorted(snapshot.items())) or "(idle)"
     logger.info("heartbeat: %s", parts)
+    if state_dir is not None and cfg is not None:
+        health.write_status(
+            state_dir=state_dir,
+            cursor=cursor,
+            metrics=snapshot,
+            daily_cost_cap_usd=cfg.daily_cost_cap_usd,
+            paused=paused,
+            stop_requested=stop_requested,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +511,11 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(cfg.debug)
     _install_signal_handlers()
     state_dir = state.DEFAULT_STATE_DIR
-    state.init_state_dir(state_dir)
+    try:
+        state.init_state_dir(state_dir)
+    except state.SchemaTooNew as e:
+        print(f"state.db schema error: {e}", file=sys.stderr)
+        return 5
 
     try:
         _preflight(state_dir)
@@ -561,7 +602,13 @@ def main(argv: list[str] | None = None) -> int:
             state.prune_reply_counter()
             last_prune = now
         if now - last_heartbeat > HEARTBEAT_INTERVAL_SECONDS:
-            _heartbeat()
+            _heartbeat(
+                state_dir=state_dir,
+                cursor=cursor,
+                cfg=cfg,
+                paused=_is_paused(state_dir),
+                stop_requested=False,
+            )
             last_heartbeat = now
 
         if args.once:
@@ -571,7 +618,11 @@ def main(argv: list[str] | None = None) -> int:
                 break
             time.sleep(0.1)
 
-    _heartbeat()
+    _heartbeat(
+        state_dir=state_dir, cursor=cursor, cfg=cfg,
+        paused=_is_paused(state_dir),
+        stop_requested=True,
+    )
     logger.info("bridge stopped at cursor=%d", cursor)
     return 0
 

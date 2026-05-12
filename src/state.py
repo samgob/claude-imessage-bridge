@@ -22,7 +22,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_STATE_DIR = Path.home() / ".claude-imessage-bridge"
 
 
-_SCHEMA = """
+# Schema version. Bump when a migration is added, and append a step to
+# ``_MIGRATIONS`` that knows how to bring v=current → v=current+1. The
+# bridge refuses to start if the on-disk DB has a HIGHER version than this
+# code understands (forward incompatibility — operator probably downgraded
+# without thinking).
+SCHEMA_VERSION: int = 1
+
+
+# v0 schema (what the project shipped pre-Phase-D). New installs leapfrog
+# straight to v1 via the migration step.
+_SCHEMA_V0 = """
 CREATE TABLE IF NOT EXISTS cursor (
     name TEXT PRIMARY KEY,
     value INTEGER NOT NULL
@@ -63,6 +73,87 @@ CREATE TABLE IF NOT EXISTS daily_cost (
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 CREATE INDEX IF NOT EXISTS idx_reply_counter_bucket ON reply_counter(bucket);
 """
+
+
+# Migration 0 → 1: add structured columns to audit_log so the cookbook
+# queries don't have to regex the ``detail`` column.
+#   chatdb_rowid    — the message.ROWID the row was triggered by; lets you
+#                     correlate audit rows back to chat.db.
+#   cost_cents      — claude spend attributed to this row (in cents). 0
+#                     for non-claude rows (commands, drops).
+#   error_category  — one of "timeout"/"exec_error"/"json_parse"/
+#                     "claude_error"/None; matches claude_runner's
+#                     ClaudeResult.error_category.
+_MIGRATION_V0_TO_V1 = """
+ALTER TABLE audit_log ADD COLUMN chatdb_rowid INTEGER;
+ALTER TABLE audit_log ADD COLUMN cost_cents INTEGER;
+ALTER TABLE audit_log ADD COLUMN error_category TEXT;
+CREATE INDEX IF NOT EXISTS idx_audit_chatdb_rowid ON audit_log(chatdb_rowid);
+"""
+
+
+class SchemaTooNew(RuntimeError):
+    """state.db has a higher user_version than this code understands."""
+
+
+def _apply_schema(conn: sqlite3.Connection) -> None:
+    """Apply schema migrations forward to ``SCHEMA_VERSION``.
+
+    Uses SQLite's ``PRAGMA user_version`` as the migration ledger so we
+    don't need a separate migrations table. Each step is wrapped in its
+    own transaction.
+    """
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current > SCHEMA_VERSION:
+        raise SchemaTooNew(
+            f"state.db has user_version={current}, but this code only knows "
+            f"how to handle up to {SCHEMA_VERSION}. Did you downgrade? "
+            "Remove the DB to reset, or upgrade the daemon."
+        )
+    if current == 0:
+        # Fresh install OR pre-Phase-D DB. Apply v0 base + v1 migration.
+        with conn:
+            conn.executescript(_SCHEMA_V0)
+            # Check whether ALTER columns already exist (covers the case of
+            # a fresh DB where _SCHEMA_V0 already includes them in the
+            # future, vs. a v0 DB that needs the ALTER). For now v0 schema
+            # doesn't include the new columns, so this is the migration path.
+            existing_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(audit_log)")
+            }
+            stmts = []
+            if "chatdb_rowid" not in existing_cols:
+                stmts.append(
+                    "ALTER TABLE audit_log ADD COLUMN chatdb_rowid INTEGER"
+                )
+            if "cost_cents" not in existing_cols:
+                stmts.append(
+                    "ALTER TABLE audit_log ADD COLUMN cost_cents INTEGER"
+                )
+            if "error_category" not in existing_cols:
+                stmts.append(
+                    "ALTER TABLE audit_log ADD COLUMN error_category TEXT"
+                )
+            for stmt in stmts:
+                conn.execute(stmt)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS "
+                "idx_audit_chatdb_rowid ON audit_log(chatdb_rowid)"
+            )
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
+    # If we add more versions, chain the migrations here.
+    # Example: if current < 2: apply v1→v2 …
+    if current < SCHEMA_VERSION:
+        # Forward-incompatible code path: warn loud and stamp the version.
+        logger.warning(
+            "state.db user_version=%d; this code expects %d but has no "
+            "registered migration. Stamping forward.",
+            current, SCHEMA_VERSION,
+        )
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
 
 
 def _secure_open_db(path: Path) -> sqlite3.Connection:
@@ -110,8 +201,7 @@ def init_state_dir(state_dir: Path = DEFAULT_STATE_DIR) -> Path:
     db_path = state_dir / "state.db"
     conn = _secure_open_db(db_path)
     try:
-        conn.executescript(_SCHEMA)
-        conn.commit()
+        _apply_schema(conn)
     finally:
         conn.close()
     return db_path
@@ -272,6 +362,9 @@ def audit(
     kind: str,
     detail: Optional[str] = None,
     reply_bytes: Optional[int] = None,
+    chatdb_rowid: Optional[int] = None,
+    cost_cents: Optional[int] = None,
+    error_category: Optional[str] = None,
     state_dir: Path = DEFAULT_STATE_DIR,
 ) -> None:
     """Append one audit row.
@@ -280,13 +373,23 @@ def audit(
     daemon's debug flag controls whether bodies are passed in. Defaults
     pass commands (e.g., "/sessions"), classification labels, or short
     structured summaries.
+
+    The structured columns (``chatdb_rowid``, ``cost_cents``,
+    ``error_category``) were added in schema v1 to make the audit-log
+    cookbook queries straightforward without regexing ``detail``. They're
+    optional — older callers that pass only ``detail`` continue to work,
+    NULL-filled in the new columns.
     """
     ts = datetime.now(timezone.utc).isoformat()
     with connection(state_dir) as conn:
         conn.execute(
             "INSERT INTO audit_log (ts, handle_redacted, direction, kind, "
-            "detail, reply_bytes) VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, handle_redacted, direction, kind, detail, reply_bytes),
+            "detail, reply_bytes, chatdb_rowid, cost_cents, error_category) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ts, handle_redacted, direction, kind,
+                detail, reply_bytes, chatdb_rowid, cost_cents, error_category,
+            ),
         )
 
 
