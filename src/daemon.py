@@ -142,27 +142,25 @@ def _classify(body: str) -> str:
     return "text"
 
 
-def _user_facing_error(category: Optional[str], consec_failures: int) -> str:
+def _user_facing_error(category: Optional[str]) -> str:
     """Translate a claude_runner error category into a user-safe message.
 
-    Critically: NEVER include the underlying error string. Claude's stderr
-    can contain file paths, MCP server names, traceback fragments — all
-    leak info to anyone with iMessage access to this account (per
-    adversarial review S3).
+    Critically: NEVER include the underlying error string OR the
+    consecutive-failure count. Claude's stderr can contain file paths,
+    MCP server names, traceback fragments — all leak info to anyone with
+    iMessage access to this account. The consecutive-failure counter
+    also leaks the circuit-breaker threshold to a probing attacker (per
+    adversarial review S3 + D2).
     """
-    suffix = (
-        f"\n(Run #{consec_failures} of consecutive failures; bridge auto-"
-        "pauses at the configured threshold.)" if consec_failures > 1 else ""
-    )
     if category == "timeout":
-        return "⚠️ Claude timed out. Try a simpler prompt." + suffix
+        return "⚠️ Claude timed out. Try a simpler prompt."
     if category == "exec_error":
-        return "⚠️ Couldn't run Claude. Check daemon logs." + suffix
+        return "⚠️ Couldn't run Claude. Check daemon logs."
     if category == "json_parse":
-        return "⚠️ Got a malformed response from Claude. Check daemon logs." + suffix
+        return "⚠️ Got a malformed response from Claude. Check daemon logs."
     if category == "claude_error":
-        return "⚠️ Claude reported an error. Try again." + suffix
-    return "⚠️ Reply unavailable. Check daemon logs." + suffix
+        return "⚠️ Claude reported an error. Try again."
+    return "⚠️ Reply unavailable. Check daemon logs."
 
 
 def _handle_one(msg: imessage_reader.Message, cfg) -> None:
@@ -251,16 +249,15 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         )
         return
 
-    # Invoke claude in the hermetic sandbox. claude_runner enforces the
-    # safe-argv invariants (no --dangerously-skip-permissions, no
-    # forbidden tools, no MCP-namespaced tools, -- separator before
-    # prompt). It returns a structured result; we never raise on
-    # Claude-side errors, just report.
+    # Invoke claude in a per-call hermetic sandbox. claude_runner provisions
+    # a fresh tempdir + empty-mcp.json for each call and tears them down
+    # after. It enforces the safe-argv invariants (no
+    # --dangerously-skip-permissions, no forbidden tools, no MCP-namespaced
+    # tools, -- separator before prompt). It returns a structured result;
+    # we never raise on Claude-side errors, just report.
     try:
         result = claude_runner.run_claude(
             msg.body,
-            sandbox_cwd=state.sandbox_dir(),
-            mcp_config_path=state.mcp_config_path(),
             allowed_tools=cfg.allowed_tools,
             max_turns=cfg.per_call_max_turns,
             timeout_seconds=cfg.per_call_timeout_seconds,
@@ -329,7 +326,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         _metrics["claude_failures"] += 1
         # User-facing error is GENERIC. The actual error string (which may
         # contain file paths or internal info) is logged server-side only.
-        reply_body = _user_facing_error(result.error_category, failures)
+        reply_body = _user_facing_error(result.error_category)
         kind = "reply"
         detail = (
             f"err category={result.error_category} "
@@ -439,8 +436,6 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("running selftest: verifying Bash denial under current config…")
     try:
         claude_runner.selftest_bash_denied(
-            sandbox_cwd=state.sandbox_dir(state_dir),
-            mcp_config_path=state.mcp_config_path(state_dir),
             claude_bin=cfg.claude_binary,
             timeout_seconds=min(cfg.per_call_timeout_seconds, 60),
         )

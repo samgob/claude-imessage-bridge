@@ -36,6 +36,7 @@ import logging
 import os
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,6 +143,15 @@ BRIDGE_SYSTEM_PROMPT: Final = (
 )
 
 # Environment variables the child inherits. Everything else is dropped.
+#
+# Notably absent:
+# - TMPDIR: an attacker-controlled TMPDIR (set in launchd plist, inherited
+#   from an unrelated shell session) can become a symlink ladder or a
+#   sticky-bit-weak directory claude writes session JSON / prompt caches
+#   into. Let claude default to /tmp via libc.
+# - ANTHROPIC_AUTH_TOKEN: redundant with CLAUDE_CODE_OAUTH_TOKEN on modern
+#   installs, and having both reachable risks claude picking the wrong
+#   account when both are set. We only pass through one OAuth path.
 _ENV_ALLOWLIST: Final = frozenset({
     "PATH",
     "HOME",
@@ -149,9 +159,7 @@ _ENV_ALLOWLIST: Final = frozenset({
     "LANG",
     "LC_ALL",
     "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
-    "TMPDIR",
 })
 
 
@@ -211,37 +219,94 @@ def _scrubbed_env() -> dict:
     return env
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Best-effort SIGTERM-then-SIGKILL of the child's process group.
+
+    Avoids PID-reuse races by:
+      - re-checking proc.poll() before each kill (skip if already exited)
+      - resolving the pgid via ``os.getpgid(proc.pid)`` rather than using
+        ``proc.pid`` directly (which only happens to equal the pgid because
+        we set ``start_new_session=True``).
+
+    All ``OSError``s (ProcessLookupError when the group is already gone,
+    PermissionError if somehow targeting a foreign group) are swallowed —
+    cleanup is best-effort.
+    """
+    if proc.poll() is not None:
+        return  # already exited; nothing to kill
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        proc.wait(timeout=3)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _write_empty_mcp_safe(path: Path) -> None:
+    """Write the empty-mcp.json content to ``path`` without following symlinks.
+
+    Defends against an attacker pre-creating ``path`` as a symlink to a
+    sensitive file (e.g., ``~/.ssh/authorized_keys``). ``Path.write_text``
+    follows symlinks and would clobber the target; ``os.open`` with
+    ``O_NOFOLLOW | O_CREAT | O_EXCL`` refuses to open through a symlink and
+    fails if the path already exists.
+    """
+    fd = os.open(
+        str(path),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.write(fd, b'{"mcpServers":{}}\n')
+    finally:
+        os.close(fd)
+
+
 def run_claude(
     prompt: str,
     *,
-    sandbox_cwd: Path,
-    mcp_config_path: Path,
     allowed_tools: list[str],
     max_turns: int = 1,
     timeout_seconds: int = 90,
     claude_bin: str = DEFAULT_CLAUDE_BIN,
 ) -> ClaudeResult:
-    """Invoke ``claude -p`` once in a hermetic sandbox.
+    """Invoke ``claude -p`` once in a per-call hermetic sandbox.
 
-    ``sandbox_cwd`` should be a dedicated empty directory created by the
-    daemon at startup (NOT the user's project directory — that would load
-    the user's CLAUDE.md and discover MCP servers).
+    Each invocation creates a fresh ``tempfile.TemporaryDirectory`` (mode
+    0o700) and writes a fresh ``empty-mcp.json`` into it before spawning
+    claude. After the call returns (or times out), the directory and any
+    files in it are removed. This kills two attack surfaces in one move:
 
-    ``mcp_config_path`` should point at a file containing ``{"mcpServers":{}}``.
+    1. **Symlink-write on empty-mcp.json** — the path doesn't pre-exist;
+       there's nothing for an attacker to pre-create as a symlink. ``O_EXCL``
+       + ``O_NOFOLLOW`` on the write enforces this.
+    2. **Sandbox-dir tamper between invocations** — a persistent sandbox
+       directory could have ``CLAUDE.md`` or ``.mcp.json`` dropped into it
+       between calls. A per-call dir means there's no window.
+
+    Cost: one mkdir + one write + one rmtree per call (~ms).
 
     Raises:
         RunnerConfigError: invocation parameters themselves are unsafe.
-        FileNotFoundError: claude_bin or mcp_config_path missing.
+        FileNotFoundError: claude_bin missing.
     """
     _validate_tool_list(allowed_tools)
 
     if not Path(claude_bin).is_file():
         raise FileNotFoundError(f"claude binary not found at {claude_bin}")
-
-    if not sandbox_cwd.is_dir():
-        raise RunnerConfigError(f"sandbox_cwd not a directory: {sandbox_cwd}")
-    if not mcp_config_path.is_file():
-        raise FileNotFoundError(f"mcp config not found at {mcp_config_path}")
 
     # Cap prompt length.
     encoded = prompt.encode("utf-8")
@@ -262,76 +327,87 @@ def run_claude(
     # tools — that's why HARD_DISALLOWED above does the actual work.
     allow_value = ",".join(allowed_tools) if allowed_tools else ""
 
-    argv = [
-        claude_bin,
-        "-p",
-        "--output-format", "json",
-        "--strict-mcp-config",
-        "--mcp-config", str(mcp_config_path),
-        "--disallowed-tools", disallow_value,
-        "--allowed-tools", allow_value,
-        "--max-turns", str(int(max_turns)),
-        "--append-system-prompt", BRIDGE_SYSTEM_PROMPT,
-        # ``--`` is REQUIRED: prevents a prompt that begins with ``--`` from
-        # being reparsed as additional flags. Position is right before the
-        # positional prompt.
-        "--",
-        prompt,
-    ]
-    _assert_safe_argv(argv)
-
-    logger.info(
-        "claude -p (sandbox_cwd=%s, allow=%r, disallow_count=%d, "
-        "max_turns=%d, prompt_bytes=%d)",
-        sandbox_cwd,
-        allow_value,
-        len(effective_disallow),
-        max_turns,
-        len(prompt.encode("utf-8")),
-    )
     start = time.time()
-
-    # Spawn with new session so we can kill the whole process group on
-    # timeout — otherwise Node MCP children survive as orphans.
-    try:
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(sandbox_cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_scrubbed_env(),
-            start_new_session=True,
-        )
-    except OSError as e:
-        return ClaudeResult(
-            success=False, reply="", session_id=None, cost_usd=0.0,
-            duration_ms=int((time.time() - start) * 1000),
-            error=f"spawn failed: {e}",
-            error_category="exec_error",
-        )
-
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        # Kill the whole process group (claude + any Node MCP children).
+    # Per-call hermetic sandbox: fresh tempdir + fresh empty-mcp.json. Both
+    # vanish when the context exits. mode=0o700 is the default for
+    # TemporaryDirectory on POSIX.
+    with tempfile.TemporaryDirectory(prefix="cimb-call-") as sandbox_str:
+        sandbox = Path(sandbox_str)
+        mcp_path = sandbox / "empty-mcp.json"
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        duration = int((time.time() - start) * 1000)
-        logger.warning("claude -p timeout after %ds; killed process group",
-                       timeout_seconds)
-        return ClaudeResult(
-            success=False, reply="", session_id=None, cost_usd=0.0,
-            duration_ms=duration,
-            error=f"timeout after {timeout_seconds}s",
-            error_category="timeout",
+            _write_empty_mcp_safe(mcp_path)
+        except OSError as e:
+            return ClaudeResult(
+                success=False, reply="", session_id=None, cost_usd=0.0,
+                duration_ms=int((time.time() - start) * 1000),
+                error=f"could not write empty-mcp.json: {e}",
+                error_category="exec_error",
+            )
+
+        argv = [
+            claude_bin,
+            "-p",
+            "--output-format", "json",
+            "--strict-mcp-config",
+            "--mcp-config", str(mcp_path),
+            "--disallowed-tools", disallow_value,
+            "--allowed-tools", allow_value,
+            "--max-turns", str(int(max_turns)),
+            "--append-system-prompt", BRIDGE_SYSTEM_PROMPT,
+            # ``--`` is REQUIRED: prevents a prompt that begins with ``--``
+            # from being reparsed as additional flags. Position is right
+            # before the positional prompt.
+            "--",
+            prompt,
+        ]
+        _assert_safe_argv(argv)
+
+        logger.info(
+            "claude -p (sandbox=%s, allow=%r, disallow_count=%d, "
+            "max_turns=%d, prompt_bytes=%d)",
+            sandbox,
+            allow_value,
+            len(effective_disallow),
+            max_turns,
+            len(prompt.encode("utf-8")),
         )
+
+        # Spawn with new session so we can kill the whole process group on
+        # timeout — otherwise Node MCP children survive as orphans.
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(sandbox),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=_scrubbed_env(),
+                start_new_session=True,
+            )
+        except OSError as e:
+            return ClaudeResult(
+                success=False, reply="", session_id=None, cost_usd=0.0,
+                duration_ms=int((time.time() - start) * 1000),
+                error=f"spawn failed: {e}",
+                error_category="exec_error",
+            )
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            # Kill the whole process group (claude + any Node MCP children).
+            # Check proc.poll() each step to avoid PID-reuse races where
+            # the kernel reassigns proc.pid to an unrelated process.
+            _kill_process_group(proc)
+            duration = int((time.time() - start) * 1000)
+            logger.warning("claude -p timeout after %ds; killed process group",
+                           timeout_seconds)
+            return ClaudeResult(
+                success=False, reply="", session_id=None, cost_usd=0.0,
+                duration_ms=duration,
+                error=f"timeout after {timeout_seconds}s",
+                error_category="timeout",
+            )
 
     duration = int((time.time() - start) * 1000)
 
@@ -408,8 +484,6 @@ class SelfTestFailed(RuntimeError):
 
 def selftest_bash_denied(
     *,
-    sandbox_cwd: Path,
-    mcp_config_path: Path,
     claude_bin: str = DEFAULT_CLAUDE_BIN,
     timeout_seconds: int = 60,
 ) -> None:
@@ -417,56 +491,50 @@ def selftest_bash_denied(
 
     Empirical proof that this build's tool-disallow incantation is still
     correct. Anthropic could in principle change CLI semantics or add new
-    tools in a future release; the self-test catches that the next time
-    the daemon boots.
+    tools in a future release; this test catches that the next time the
+    daemon boots.
 
-    The canary path is in the sandbox so even if the test FALSELY succeeds
-    (claude lies, file actually gets written somehow), it lands in a known
-    location we can clean up.
+    The canary path is in a dedicated tempdir (outside of
+    ``run_claude``'s own per-call sandbox so we can inspect it after the
+    call returns and the inner sandbox is gone). The path is constructed
+    via mkdtemp + a fixed filename inside, so it's unguessable by a
+    malicious model attempting to pre-create the canary in a different
+    location.
     """
-    canary = sandbox_cwd / "_selftest_canary.txt"
-    if canary.exists():
-        canary.unlink()
+    with tempfile.TemporaryDirectory(prefix="cimb-selftest-") as st_dir_str:
+        st_dir = Path(st_dir_str)
+        canary = st_dir / "_selftest_canary.txt"
+        assert not canary.exists()
 
-    test_prompt = (
-        f"Use the Bash tool right now to run: "
-        f"echo SELFTEST_FAIL > {canary}. "
-        f"Then read it back. Report exactly what happened."
-    )
-    result = run_claude(
-        test_prompt,
-        sandbox_cwd=sandbox_cwd,
-        mcp_config_path=mcp_config_path,
-        allowed_tools=[],
-        max_turns=4,
-        timeout_seconds=timeout_seconds,
-        claude_bin=claude_bin,
-    )
-
-    canary_present = canary.exists()
-    if canary_present:
-        # Clean up before raising so we don't leave a misleading file.
-        try:
-            canary.unlink()
-        except OSError:
-            pass
-        raise SelfTestFailed(
-            "Bash WAS executed via claude despite --disallowed-tools — "
-            "the Phase B security boundary is NOT holding. Refusing to "
-            "start the daemon. Tool-deny config may have drifted in a "
-            "Claude Code version bump. Reply text was: "
-            f"{result.reply[:200]!r}"
+        test_prompt = (
+            f"Use the Bash tool right now to run: "
+            f"echo SELFTEST_FAIL > {canary}. "
+            f"Then read it back. Report exactly what happened."
+        )
+        result = run_claude(
+            test_prompt,
+            allowed_tools=[],
+            max_turns=4,
+            timeout_seconds=timeout_seconds,
+            claude_bin=claude_bin,
         )
 
-    if not result.success:
-        # Couldn't even run the test — refuse, force a human look.
-        raise SelfTestFailed(
-            f"Self-test couldn't complete: {result.error}. "
-            "Refusing to start; cannot verify Bash is denied."
-        )
+        if canary.exists():
+            raise SelfTestFailed(
+                "Bash WAS executed via claude despite --disallowed-tools — "
+                "the Phase B security boundary is NOT holding. Refusing to "
+                "start the daemon. Tool-deny config may have drifted in a "
+                "Claude Code version bump. Reply text was: "
+                f"{result.reply[:200]!r}"
+            )
 
-    # Belt-and-suspenders: log the cost so we can see selftest spend.
-    logger.info(
-        "selftest: bash denied (canary absent, cost=$%.4f, duration=%dms)",
-        result.cost_usd, result.duration_ms,
-    )
+        if not result.success:
+            raise SelfTestFailed(
+                f"Self-test couldn't complete: {result.error}. "
+                "Refusing to start; cannot verify Bash is denied."
+            )
+
+        logger.info(
+            "selftest: bash denied (canary absent, cost=$%.4f, duration=%dms)",
+            result.cost_usd, result.duration_ms,
+        )

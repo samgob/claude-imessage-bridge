@@ -19,9 +19,10 @@ Phase A→B preconditions enforced here (per solver review #9):
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import yaml
 
@@ -51,6 +52,68 @@ class Config:
     @property
     def allowlist_set(self) -> set:
         return set(self.allowlist)
+
+
+def _validate_claude_binary(path: str) -> None:
+    """Refuse a claude binary whose resolved target is suspicious.
+
+    Defends against an attacker who can write to ``/usr/local/bin/``
+    swapping ``claude`` for their own binary (or a symlink chain that
+    eventually points to an attacker-owned file).
+
+    Policy:
+      - Resolve the symlink chain (Homebrew normally installs
+        ``/usr/local/bin/claude`` as a symlink to a Cellar path).
+      - Resolved target must exist, be a regular file.
+      - Owner must be root or the current user.
+      - File must not be group- or world-writable.
+      - Parent directory of the resolved file must not be
+        group- or world-writable.
+      - EACH directory in the symlink chain must also not be
+        group- or world-writable (so an attacker can't swap a
+        link mid-chain).
+    """
+    if not path:
+        raise ValueError("claude_binary is empty")
+    p = Path(path)
+    if not p.exists():
+        raise ValueError(
+            f"claude_binary {path!r} does not exist. Install Claude Code "
+            "or set claude_binary in config.yaml to the right path."
+        )
+    try:
+        resolved = p.resolve(strict=True)
+        st = resolved.stat()
+    except (OSError, FileNotFoundError) as e:
+        raise ValueError(f"claude_binary {path!r}: {e}")
+    if not resolved.is_file():
+        raise ValueError(f"claude_binary {path!r}: not a regular file")
+    current_uid = os.getuid()
+    if st.st_uid not in (0, current_uid):
+        raise ValueError(
+            f"claude_binary {path!r} (resolved to {resolved}) is owned by "
+            f"uid {st.st_uid}; refusing (must be root or this user, "
+            f"uid={current_uid})"
+        )
+    if st.st_mode & 0o022:
+        raise ValueError(
+            f"claude_binary {resolved} is group- or world-writable "
+            f"(mode={oct(st.st_mode & 0o777)}); refusing"
+        )
+    # Walk every directory we traversed (input path's parent + resolved's
+    # parent) and refuse if any is g+w / o+w.
+    for d in {p.parent, resolved.parent}:
+        try:
+            dst = d.stat()
+        except OSError as e:
+            raise ValueError(
+                f"could not stat directory {d} in claude_binary path: {e}"
+            )
+        if dst.st_mode & 0o022:
+            raise ValueError(
+                f"directory {d} on claude_binary path is group/world-writable "
+                f"(mode={oct(dst.st_mode & 0o777)}); refusing"
+            )
 
 
 def _validate_tools(allowed: List[str], forbidden: List[str]) -> None:
@@ -166,11 +229,7 @@ def load(path: Path) -> Config:
         raise ValueError("circuit_breaker_failures must be in [2, 100]")
 
     claude_bin = str(raw.get("claude_binary", DEFAULT_CLAUDE_BIN))
-    if not Path(claude_bin).is_file():
-        raise ValueError(
-            f"claude_binary {claude_bin!r} does not exist. Install Claude "
-            "Code or set claude_binary in config.yaml to the right path."
-        )
+    _validate_claude_binary(claude_bin)
 
     debug = bool(raw.get("debug", False))
 
