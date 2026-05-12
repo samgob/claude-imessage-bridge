@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS cursor (
 CREATE TABLE IF NOT EXISTS conversations (
     handle TEXT PRIMARY KEY,
     current_session_id TEXT,
-    last_options_json TEXT,
+    last_options_json TEXT,   -- numbered list from last /sessions or /use
+    last_options_at TEXT,     -- ts the options were captured (expiry check)
     updated_at TEXT NOT NULL
 );
 
@@ -211,27 +212,52 @@ def set_current_session(
 def set_last_options(
     handle: str, options: list, *, state_dir: Path = DEFAULT_STATE_DIR
 ) -> None:
-    """Stash the numbered options shown to the user (for /pick N)."""
+    """Stash the numbered options shown to the user (for /pick N).
+
+    Each option is a dict: ``{"id": session_id, "snippet": str}``. The
+    list survives across messages until the next /sessions or /use
+    overwrites it (or it ages out — see LAST_OPTIONS_TTL_SECONDS).
+    """
     now = datetime.now(timezone.utc).isoformat()
     payload = json.dumps(options) if options else None
     with connection(state_dir) as conn:
         conn.execute(
-            "INSERT INTO conversations (handle, last_options_json, updated_at) "
-            "VALUES (?, ?, ?) "
+            "INSERT INTO conversations "
+            "  (handle, last_options_json, last_options_at, updated_at) "
+            "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(handle) DO UPDATE SET "
-            "last_options_json = excluded.last_options_json, "
-            "updated_at = excluded.updated_at",
-            (handle, payload, now),
+            "  last_options_json = excluded.last_options_json, "
+            "  last_options_at = excluded.last_options_at, "
+            "  updated_at = excluded.updated_at",
+            (handle, payload, now, now),
         )
 
 
-def get_last_options(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> list:
+LAST_OPTIONS_TTL_SECONDS = 30 * 60  # 30 min — stale picks aren't honored
+
+
+def get_last_options(
+    handle: str, *, state_dir: Path = DEFAULT_STATE_DIR
+) -> list:
+    """Return the numbered options shown to ``handle``, or [] if stale/absent.
+
+    Options older than LAST_OPTIONS_TTL_SECONDS are treated as missing —
+    prevents a much-later /pick from resurrecting an old context the user
+    may have forgotten about.
+    """
     with connection(state_dir) as conn:
         row = conn.execute(
-            "SELECT last_options_json FROM conversations WHERE handle = ?",
+            "SELECT last_options_json, last_options_at "
+            "FROM conversations WHERE handle = ?",
             (handle,),
         ).fetchone()
-        if not row or not row["last_options_json"]:
+        if not row or not row["last_options_json"] or not row["last_options_at"]:
+            return []
+        try:
+            options_at = datetime.fromisoformat(row["last_options_at"])
+        except (TypeError, ValueError):
+            return []
+        if (datetime.now(timezone.utc) - options_at).total_seconds() > LAST_OPTIONS_TTL_SECONDS:
             return []
         try:
             return json.loads(row["last_options_json"])

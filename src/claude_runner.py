@@ -282,6 +282,7 @@ def run_claude(
     max_turns: int = 1,
     timeout_seconds: int = 90,
     claude_bin: str = DEFAULT_CLAUDE_BIN,
+    resume_session_id: Optional[str] = None,
 ) -> ClaudeResult:
     """Invoke ``claude -p`` once in a per-call hermetic sandbox.
 
@@ -354,6 +355,13 @@ def run_claude(
             "--allowed-tools", allow_value,
             "--max-turns", str(int(max_turns)),
             "--append-system-prompt", BRIDGE_SYSTEM_PROMPT,
+        ]
+        if resume_session_id:
+            # Resume the named session's transcript context. Tool authority
+            # is STILL gated by --disallowed-tools above; the resumed
+            # session's prior tool uses don't grant new authority.
+            argv += ["--resume", resume_session_id]
+        argv += [
             # ``--`` is REQUIRED: prevents a prompt that begins with ``--``
             # from being reparsed as additional flags. Position is right
             # before the positional prompt.

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import claude_runner
+from . import commands as commands_mod
 from . import config as config_mod
 from . import imessage_reader
 from . import imessage_sender
@@ -218,6 +219,48 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         )
         return
 
+    # Command path: /-prefixed messages dispatch to commands.py instead
+    # of claude. Commands are cheap (no LLM call, no cost), so they
+    # don't run through the cost cap or claude_runner.
+    if commands_mod.is_command(msg.body):
+        try:
+            cmd_result = commands_mod.parse_and_dispatch(
+                msg.body,
+                handle=norm,
+                state_dir=state.DEFAULT_STATE_DIR,
+            )
+        except Exception as e:
+            logger.exception("command dispatch crashed: %s", e)
+            state.audit(
+                handle_redacted=redacted, direction="out", kind="drop",
+                detail=f"cmd-error:{type(e).__name__}",
+            )
+            return
+
+        if cmd_result.clear_session:
+            state.set_current_session(norm, None)
+        elif cmd_result.set_session_id is not None:
+            state.set_current_session(norm, cmd_result.set_session_id)
+
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(handle=norm, body=cmd_result.reply),
+            )
+            _metrics["cmd_replies"] += 1
+            state.audit(
+                handle_redacted=redacted, direction="out", kind="reply",
+                detail=f"cmd={msg.body.split()[0]}",
+                reply_bytes=len(cmd_result.reply.encode("utf-8")),
+            )
+        except imessage_sender.SendError as e:
+            _metrics["send_errors"] += 1
+            logger.error("cmd send failed: %s", e)
+            state.audit(
+                handle_redacted=redacted, direction="out", kind="drop",
+                detail=f"cmd-send-error:{type(e).__name__}",
+            )
+        return
+
     # Daily cost cap check BEFORE invoking claude. If we're already over
     # the cap, refuse and tell the user. The cap is meant to be a defense
     # against a compromised contact burning the budget, so it's deliberate
@@ -255,6 +298,12 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     # --dangerously-skip-permissions, no forbidden tools, no MCP-namespaced
     # tools, -- separator before prompt). It returns a structured result;
     # we never raise on Claude-side errors, just report.
+    #
+    # If the handle has a current session id set (from a prior /use, /pick,
+    # or the most recent stateless invocation), resume that session — the
+    # transcript context loads, but tool authority is still gated by
+    # --disallowed-tools (resume doesn't grant new tool authority).
+    resume_id = state.get_current_session(norm)
     try:
         result = claude_runner.run_claude(
             msg.body,
@@ -262,6 +311,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             max_turns=cfg.per_call_max_turns,
             timeout_seconds=cfg.per_call_timeout_seconds,
             claude_bin=cfg.claude_binary,
+            resume_session_id=resume_id,
         )
     except claude_runner.RunnerConfigError as e:
         logger.error("runner config error: %s", e)
@@ -314,6 +364,11 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     # cross the threshold. Resets to 0 on each success.
     if result.success:
         state.reset_claude_failures()
+        # Persist the session id so the next inbound message continues
+        # this thread instead of starting fresh. /new wipes it; /use and
+        # /pick override it.
+        if result.session_id:
+            state.set_current_session(norm, result.session_id)
         reply_body = result.reply.strip() or "(claude returned an empty response)"
         kind = "reply"
         detail = (
