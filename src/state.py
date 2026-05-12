@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS reply_counter (
     PRIMARY KEY (bucket, handle)
 );
 
+CREATE TABLE IF NOT EXISTS daily_cost (
+    -- spend by UTC date in cents (integer math, no float comparisons)
+    date_utc TEXT PRIMARY KEY,
+    cents INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 CREATE INDEX IF NOT EXISTS idx_reply_counter_bucket ON reply_counter(bucket);
 """
@@ -316,3 +322,44 @@ def prune_reply_counter(*, keep_buckets: int = 10, state_dir: Path = DEFAULT_STA
     cutoff = threshold.strftime("%Y%m%d%H%M")
     with connection(state_dir) as conn:
         conn.execute("DELETE FROM reply_counter WHERE bucket < ?", (cutoff,))
+
+
+# --- Daily cost tracking ---------------------------------------------------
+
+def _today_utc_date() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def today_cost_cents(*, state_dir: Path = DEFAULT_STATE_DIR) -> int:
+    """Cents spent today (UTC). Returns 0 if no entry."""
+    today = _today_utc_date()
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT cents FROM daily_cost WHERE date_utc = ?", (today,)
+        ).fetchone()
+        return int(row["cents"]) if row else 0
+
+
+def add_cost_cents(amount_cents: int, *, state_dir: Path = DEFAULT_STATE_DIR) -> int:
+    """Add ``amount_cents`` to today's tally. Returns the new total.
+
+    Use integer cents — float USD comparisons can flap around the cap due
+    to FP precision. Round up partial cents at the callsite.
+    """
+    today = _today_utc_date()
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO daily_cost (date_utc, cents) VALUES (?, ?) "
+            "ON CONFLICT(date_utc) DO UPDATE SET cents = cents + excluded.cents",
+            (today, int(amount_cents)),
+        )
+        row = conn.execute(
+            "SELECT cents FROM daily_cost WHERE date_utc = ?", (today,)
+        ).fetchone()
+        return int(row["cents"])
+
+
+def cost_over_cap(cap_usd: float, *, state_dir: Path = DEFAULT_STATE_DIR) -> bool:
+    """True if today's spend already meets or exceeds the cap."""
+    cap_cents = int(round(cap_usd * 100))
+    return today_cost_cents(state_dir=state_dir) >= cap_cents

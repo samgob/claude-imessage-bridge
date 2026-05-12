@@ -2,18 +2,31 @@
 
 Config lives at ``~/.claude-imessage-bridge/config.yaml`` (NOT in repo).
 A sample is checked in at ``config.example.yaml``.
+
+Phase A→B preconditions enforced here (per solver review #9):
+
+- ``allowed_tools`` MUST be explicitly declared in the YAML. No implicit
+  defaults — silent defaults are exactly the failure mode the solver
+  flagged ("user thinks they're locked down but inherited a permissive
+  default").
+- ``allowed_tools`` MUST NOT include any of ``claude_runner.HARD_FORBIDDEN_TOOLS``
+  (Bash, Write, Edit, WebFetch, WebSearch, Skill, etc.).
+- ``allowed_tools`` MUST NOT include MCP-namespaced tools (``mcp__*``).
+- ``daily_cost_cap_usd`` must be positive (no infinite budget).
+- ``claude_binary`` must exist on disk.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import yaml
 
-from .imessage_sender import validate_handle, HandleError
+from .claude_runner import DEFAULT_CLAUDE_BIN, HARD_FORBIDDEN_TOOLS
+from .imessage_sender import HandleError, validate_handle
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +41,8 @@ class Config:
     poll_interval_seconds: float
     reply_rate_limit_per_minute: int
     daily_cost_cap_usd: float
+    per_call_timeout_seconds: int
+    claude_binary: str
     debug: bool
 
     @property
@@ -35,12 +50,35 @@ class Config:
         return set(self.allowlist)
 
 
-_DEFAULT_ALLOWED_TOOLS: List[str] = ["Read", "Grep", "Glob", "LS"]
-_DEFAULT_FORBIDDEN_TOOLS: List[str] = [
-    "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-    # Intentionally excluded from default allowed:
-    "WebFetch", "WebSearch", "Skill",
-]
+def _validate_tools(allowed: List[str], forbidden: List[str]) -> None:
+    """Enforce Phase A→B preconditions on the tool lists."""
+    if not allowed:
+        raise ValueError(
+            "allowed_tools must be a non-empty list. The bridge will not "
+            "invoke claude with an empty allow-list (would default to "
+            "the full toolset, which is the failure mode we're guarding "
+            "against)."
+        )
+    bad = HARD_FORBIDDEN_TOOLS & set(allowed)
+    if bad:
+        raise ValueError(
+            f"allowed_tools includes hard-forbidden tools: {sorted(bad)}. "
+            "These are blocked at the runner level regardless of config; "
+            "remove them or the daemon will refuse to start."
+        )
+    mcp = [t for t in allowed if t.startswith("mcp__")]
+    if mcp:
+        raise ValueError(
+            f"allowed_tools includes MCP-namespaced tools: {sorted(mcp)}. "
+            "The bridge cannot vet MCP tool capabilities (they can wrap "
+            "Bash, send messages, etc.); refuse."
+        )
+    overlap = set(allowed) & set(forbidden)
+    if overlap:
+        raise ValueError(
+            f"tools appear in both allowed_tools and forbidden_tools: "
+            f"{sorted(overlap)}"
+        )
 
 
 def load(path: Path) -> Config:
@@ -66,7 +104,9 @@ def load(path: Path) -> Config:
     allowlist: List[str] = []
     for entry in raw_allowlist:
         if not isinstance(entry, str):
-            raise ValueError(f"allowlist entries must be strings, got {type(entry).__name__}")
+            raise ValueError(
+                f"allowlist entries must be strings, got {type(entry).__name__}"
+            )
         try:
             allowlist.append(validate_handle(entry))
         except HandleError as e:
@@ -76,14 +116,18 @@ def load(path: Path) -> Config:
     if not isinstance(group_guids, list):
         raise ValueError("allow_group_chat_guids must be a list")
 
-    allowed = raw.get("allowed_tools", _DEFAULT_ALLOWED_TOOLS)
-    forbidden = raw.get("forbidden_tools", _DEFAULT_FORBIDDEN_TOOLS)
-    # Belt-and-suspenders: ensure no overlap between allowed and forbidden.
-    overlap = set(allowed) & set(forbidden)
-    if overlap:
+    # PHASE A→B PRECONDITION: tools must be explicitly declared.
+    if "allowed_tools" not in raw:
         raise ValueError(
-            f"tools appear in both allowed and forbidden lists: {sorted(overlap)}"
+            "config.yaml is missing the 'allowed_tools' key. Phase B "
+            "requires an explicit allowlist (no implicit defaults) — see "
+            "config.example.yaml for a starting point."
         )
+    allowed = raw["allowed_tools"]
+    forbidden = raw.get("forbidden_tools", [])
+    if not isinstance(allowed, list) or not isinstance(forbidden, list):
+        raise ValueError("allowed_tools and forbidden_tools must be lists")
+    _validate_tools(allowed, forbidden)
 
     poll = float(raw.get("poll_interval_seconds", 3.0))
     if poll < 1.0:
@@ -97,6 +141,17 @@ def load(path: Path) -> Config:
     if cost <= 0:
         raise ValueError("daily_cost_cap_usd must be > 0")
 
+    timeout = int(raw.get("per_call_timeout_seconds", 120))
+    if timeout < 10 or timeout > 600:
+        raise ValueError("per_call_timeout_seconds must be in [10, 600]")
+
+    claude_bin = str(raw.get("claude_binary", DEFAULT_CLAUDE_BIN))
+    if not Path(claude_bin).is_file():
+        raise ValueError(
+            f"claude_binary {claude_bin!r} does not exist. Install Claude "
+            "Code or set claude_binary in config.yaml to the right path."
+        )
+
     debug = bool(raw.get("debug", False))
 
     return Config(
@@ -108,5 +163,7 @@ def load(path: Path) -> Config:
         poll_interval_seconds=poll,
         reply_rate_limit_per_minute=rate,
         daily_cost_cap_usd=cost,
+        per_call_timeout_seconds=timeout,
+        claude_binary=claude_bin,
         debug=debug,
     )

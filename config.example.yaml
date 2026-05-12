@@ -52,8 +52,18 @@ poll_interval_seconds: 3.0
 reply_rate_limit_per_minute: 10
 
 # Hard daily $ cap on Claude API spend tracked across all conversations.
+# When met, daemon refuses to invoke claude until the next UTC day.
 daily_cost_cap_usd: 5.00
 
-# Log message bodies (incoming and outgoing) to the audit log. OFF by
-# default — leaks content into logs that may end up in backups.
+# Per-call timeout. Long-running claude responses are killed at this
+# threshold rather than blocking the daemon's main loop indefinitely.
+per_call_timeout_seconds: 120
+
+# Path to the Claude Code CLI binary. Default fits a Homebrew /usr/local
+# install; adjust if you installed elsewhere (e.g., the new native installer
+# lands it under ~/.local/bin or similar).
+claude_binary: /usr/local/bin/claude
+
+# Log message bodies (incoming and outgoing) to STDERR (not state.db).
+# OFF by default — leaks content into terminal/launchd logs.
 debug: false

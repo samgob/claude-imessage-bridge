@@ -30,6 +30,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from . import claude_runner
 from . import config as config_mod
 from . import imessage_reader
 from . import imessage_sender
@@ -196,10 +197,79 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         )
         return
 
-    snippet = msg.body[:200].replace("\n", " ")
-    reply_body = f"Echo: {snippet}"
-    if msg.body_truncated:
-        reply_body += "\n(note: your message was truncated to 16KB before processing)"
+    # Daily cost cap check BEFORE invoking claude. If we're already over
+    # the cap, refuse and tell the user. The cap is meant to be a defense
+    # against a compromised contact burning the budget, so it's deliberate
+    # that legitimate use can hit it too — the failure should be visible
+    # rather than silent.
+    if state.cost_over_cap(cfg.daily_cost_cap_usd):
+        _metrics["daily_cap_hits"] += 1
+        logger.warning(
+            "daily cost cap reached ($%.2f) — refusing claude invocation",
+            cfg.daily_cost_cap_usd,
+        )
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(
+                    handle=norm,
+                    body=(
+                        f"⚠️ Daily cost cap reached (${cfg.daily_cost_cap_usd:.2f}). "
+                        "Resets at 00:00 UTC. Edit config.yaml to raise."
+                    ),
+                ),
+            )
+        except imessage_sender.SendError:
+            pass
+        state.audit(
+            handle_redacted=redacted,
+            direction="out",
+            kind="drop",
+            detail="daily-cap-reached",
+        )
+        return
+
+    # Invoke claude. claude_runner enforces the safe-argv invariants
+    # (no --dangerously-skip-permissions, no forbidden tools, no MCP-
+    # namespaced tools). It returns a structured result; we never raise
+    # on Claude-side errors, we just report.
+    try:
+        result = claude_runner.run_claude(
+            msg.body,
+            cwd=cfg.project_directory,
+            allowed_tools=cfg.allowed_tools,
+            timeout_seconds=cfg.per_call_timeout_seconds,
+            claude_bin=cfg.claude_binary,
+        )
+    except claude_runner.RunnerConfigError as e:
+        # Configuration issue — daemon shouldn't have reached this point;
+        # log loudly and tell the user something generic.
+        logger.error("runner config error: %s", e)
+        result = claude_runner.ClaudeResult(
+            success=False, reply="", session_id=None, cost_usd=0.0,
+            duration_ms=0, error="runner config error",
+        )
+
+    # Cost accounting always — even on error, claude may have charged us
+    # for partial work. Convert to cents (round up partials).
+    cents = max(0, int(result.cost_usd * 100 + 0.999))
+    if cents:
+        state.add_cost_cents(cents)
+
+    if result.success:
+        reply_body = result.reply.strip() or "(claude returned an empty response)"
+        kind = "reply"
+        detail = (
+            f"ok dur={result.duration_ms}ms "
+            f"cost_cents={cents} "
+            f"sid={(result.session_id or 'none')[:8]}"
+        )
+    else:
+        reply_body = (
+            "⚠️ Claude returned an error. "
+            f"({(result.error or 'unknown')[:120]})"
+        )
+        kind = "reply"  # we still send something, even if it's an error
+        detail = f"err {result.error or 'unknown'}"
 
     try:
         imessage_sender.send(
@@ -207,11 +277,12 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             dry_run=False,
         )
         _metrics["replies"] += 1
+        _metrics["cost_cents"] += cents
         state.audit(
             handle_redacted=redacted,
             direction="out",
-            kind="reply",
-            detail="echo",
+            kind=kind,
+            detail=detail,
             reply_bytes=len(reply_body.encode("utf-8")),
         )
     except imessage_sender.SendError as e:
@@ -221,7 +292,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             handle_redacted=redacted,
             direction="out",
             kind="drop",
-            detail=f"send-error:{type(e).__name__}",  # no raw message
+            detail=f"send-error:{type(e).__name__}",
         )
 
 
