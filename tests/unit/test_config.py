@@ -412,3 +412,143 @@ def test_load_accepts_symlinked_claude_binary(tmp_path: Path):
     _write(cfg_path, data)
     cfg = config_mod.load(cfg_path)
     assert cfg.claude_binary == str(link)
+
+
+# --- Trust mode config parsing ------------------------------------------
+
+def test_trust_defaults_to_chat_only_when_missing(tmp_path: Path, fake_claude_binary: Path):
+    """A config with no ``trust:`` block must keep the safe OSS default —
+    chat_only for everything."""
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write(cfg_path, _good_yaml(project, fake_claude_binary))
+    cfg = config_mod.load(cfg_path)
+    assert cfg.trust_default == "chat_only"
+    assert cfg.trust_per_alias == {}
+
+
+def test_trust_default_full_loads(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["trust"] = {"default": "full"}
+    _write(cfg_path, data)
+    cfg = config_mod.load(cfg_path)
+    assert cfg.trust_default == "full"
+
+
+def test_trust_per_alias_override(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    data["trust"] = {"default": "full", "per_alias": {"wesco": "chat_only"}}
+    _write(cfg_path, data)
+    cfg = config_mod.load(cfg_path)
+    assert cfg.trust_per_alias == {"wesco": "chat_only"}
+
+
+def test_trust_invalid_default_refused(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["trust"] = {"default": "totally_unsafe"}
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="trust.default"):
+        config_mod.load(cfg_path)
+
+
+def test_trust_per_alias_with_unknown_alias_refused(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["trust"] = {"per_alias": {"undefined_alias": "chat_only"}}
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="not a defined session alias"):
+        config_mod.load(cfg_path)
+
+
+def test_trust_per_alias_invalid_preset_refused(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    data["trust"] = {"per_alias": {"wesco": "garbage"}}
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="not one of"):
+        config_mod.load(cfg_path)
+
+
+# --- Memory backend config parsing --------------------------------------
+
+def test_memory_defaults_to_none_when_missing(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write(cfg_path, _good_yaml(project, fake_claude_binary))
+    cfg = config_mod.load(cfg_path)
+    assert cfg.memory_backend == "none"
+
+
+def test_memory_claude_md_loads(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["memory"] = {
+        "backend": "claude_md",
+        "claude_md": {
+            "root": "/Users/sam/.claude/CLAUDE.md",
+            "follow_references": True,
+            "max_bytes": 32768,
+            "exclude": [".*\\.env.*"],
+        },
+    }
+    _write(cfg_path, data)
+    cfg = config_mod.load(cfg_path)
+    assert cfg.memory_backend == "claude_md"
+    assert cfg.memory_claude_md["root"] == "/Users/sam/.claude/CLAUDE.md"
+    assert cfg.memory_claude_md["max_bytes"] == 32768
+    assert cfg.memory_claude_md["exclude"] == [".*\\.env.*"]
+
+
+def test_memory_invalid_backend_refused(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["memory"] = {"backend": "nonsense"}
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="memory.backend"):
+        config_mod.load(cfg_path)
+
+
+def test_memory_max_bytes_out_of_range_refused(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["memory"] = {
+        "backend": "claude_md",
+        "claude_md": {"max_bytes": 999},  # below 1024 floor
+    }
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="max_bytes"):
+        config_mod.load(cfg_path)
+
+
+def test_memory_custom_requires_script_when_selected(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["memory"] = {"backend": "custom", "custom": {}}
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="memory.custom.script"):
+        config_mod.load(cfg_path)

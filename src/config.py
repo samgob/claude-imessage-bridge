@@ -57,6 +57,22 @@ class Config:
     # name → session UUID. Always resolved to a flat dict-of-str regardless
     # of whether the YAML input was a string or a {id: <uuid>} mapping.
     session_aliases: Dict[str, str] = field(default_factory=dict)
+    # Trust mode infrastructure. ``trust_default`` is the preset name to
+    # apply when no alias is active or the active alias has no override.
+    # ``trust_per_alias`` maps alias names to preset names. Both default
+    # to "chat_only" — the safe OSS posture. Operators who want full
+    # Claude Code in iMessage flip ``trust_default: full`` in their own
+    # config.yaml.
+    trust_default: str = "chat_only"
+    trust_per_alias: Dict[str, str] = field(default_factory=dict)
+    # Memory backend infrastructure (orthogonal to trust mode but
+    # typically scales with it). ``memory_backend`` is one of
+    # 'none' | 'claude_md' | 'custom'. Concrete backend params live in
+    # the per-backend nested dicts; the dataclass keeps them as plain
+    # dicts to avoid the per-backend explosion at this layer.
+    memory_backend: str = "none"
+    memory_claude_md: Dict[str, object] = field(default_factory=dict)
+    memory_custom: Dict[str, object] = field(default_factory=dict)
 
     @property
     def allowlist_set(self) -> set:
@@ -313,6 +329,8 @@ def load(path: Path) -> Config:
     debug = bool(raw.get("debug", False))
 
     session_aliases = _parse_session_aliases(raw)
+    trust_default, trust_per_alias = _parse_trust(raw, session_aliases)
+    memory_backend, memory_claude_md, memory_custom = _parse_memory(raw)
 
     return Config(
         project_directory=project_dir,
@@ -330,4 +348,119 @@ def load(path: Path) -> Config:
         claude_binary=claude_bin,
         debug=debug,
         session_aliases=session_aliases,
+        trust_default=trust_default,
+        trust_per_alias=trust_per_alias,
+        memory_backend=memory_backend,
+        memory_claude_md=memory_claude_md,
+        memory_custom=memory_custom,
     )
+
+
+# --- Trust mode parsing --------------------------------------------------
+
+_VALID_TRUST_PRESETS = frozenset({"chat_only", "coding", "full"})
+
+
+def _parse_trust(
+    raw: dict, session_aliases: Dict[str, str]
+) -> tuple[str, Dict[str, str]]:
+    """Parse the top-level ``trust:`` block.
+
+    Returns ``(default, per_alias)``. Both default to safe values
+    (``"chat_only"`` and ``{}``) so config files that don't mention trust
+    keep the hermetic-by-default posture they had before this feature
+    landed.
+
+    Validates: ``default`` and every ``per_alias`` value must name a
+    registered preset. Every ``per_alias`` key must already exist in
+    ``session_aliases`` (otherwise the override is dead config).
+    """
+    block = raw.get("trust") or {}
+    if not isinstance(block, dict):
+        raise ValueError("trust must be a YAML mapping (or omitted entirely)")
+
+    default = str(block.get("default", "chat_only"))
+    if default not in _VALID_TRUST_PRESETS:
+        raise ValueError(
+            f"trust.default must be one of {sorted(_VALID_TRUST_PRESETS)}, "
+            f"got {default!r}"
+        )
+
+    raw_per_alias = block.get("per_alias") or {}
+    if not isinstance(raw_per_alias, dict):
+        raise ValueError("trust.per_alias must be a YAML mapping")
+    per_alias: Dict[str, str] = {}
+    for alias_key, preset_name in raw_per_alias.items():
+        if not isinstance(alias_key, str) or not isinstance(preset_name, str):
+            raise ValueError(
+                "trust.per_alias entries must be string→string mappings"
+            )
+        if alias_key not in session_aliases:
+            raise ValueError(
+                f"trust.per_alias key {alias_key!r} is not a defined "
+                f"session alias (known: {sorted(session_aliases)})"
+            )
+        if preset_name not in _VALID_TRUST_PRESETS:
+            raise ValueError(
+                f"trust.per_alias[{alias_key!r}] preset {preset_name!r} is "
+                f"not one of {sorted(_VALID_TRUST_PRESETS)}"
+            )
+        per_alias[alias_key] = preset_name
+
+    return default, per_alias
+
+
+# --- Memory backend parsing ----------------------------------------------
+
+_VALID_MEMORY_BACKENDS = frozenset({"none", "claude_md", "custom"})
+
+
+def _parse_memory(raw: dict) -> tuple[str, Dict[str, object], Dict[str, object]]:
+    """Parse the top-level ``memory:`` block.
+
+    Returns ``(backend_name, claude_md_params, custom_params)``. Backend
+    defaults to ``'none'`` (current hermetic behavior; backward-compat).
+    """
+    block = raw.get("memory") or {}
+    if not isinstance(block, dict):
+        raise ValueError("memory must be a YAML mapping (or omitted entirely)")
+
+    backend = str(block.get("backend", "none"))
+    if backend not in _VALID_MEMORY_BACKENDS:
+        raise ValueError(
+            f"memory.backend must be one of {sorted(_VALID_MEMORY_BACKENDS)}, "
+            f"got {backend!r}"
+        )
+
+    claude_md_block = block.get("claude_md") or {}
+    if not isinstance(claude_md_block, dict):
+        raise ValueError("memory.claude_md must be a YAML mapping")
+    # Normalize the params; the backend module validates them deeper.
+    claude_md_params: Dict[str, object] = {
+        "root": str(claude_md_block.get("root", "~/.claude/CLAUDE.md")),
+        "follow_references": bool(claude_md_block.get("follow_references", True)),
+        "max_bytes": int(claude_md_block.get("max_bytes", 32768)),
+        "exclude": list(claude_md_block.get("exclude", [])),
+    }
+    max_bytes_val = claude_md_params["max_bytes"]
+    assert isinstance(max_bytes_val, int)  # mypy narrowing; set above
+    if max_bytes_val < 1024 or max_bytes_val > 256 * 1024:
+        raise ValueError(
+            "memory.claude_md.max_bytes must be in [1024, 262144]"
+        )
+
+    custom_block = block.get("custom") or {}
+    if not isinstance(custom_block, dict):
+        raise ValueError("memory.custom must be a YAML mapping")
+    custom_params: Dict[str, object] = {
+        "script": str(custom_block.get("script", "")),
+        "timeout_seconds": int(custom_block.get("timeout_seconds", 5)),
+    }
+    if backend == "custom":
+        script = custom_params["script"]
+        if not isinstance(script, str) or not script:
+            raise ValueError("memory.custom.script is required when backend=custom")
+        # Existence + executability is checked at startup, not config-load,
+        # so the operator can edit the script after first config-load.
+
+    return backend, claude_md_params, custom_params
