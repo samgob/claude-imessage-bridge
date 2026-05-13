@@ -36,7 +36,10 @@ DEFAULT_STATE_DIR = Path.home() / ".claude-imessage-bridge"
 #        original migration was CREATE TABLE IF NOT EXISTS, a no-op for
 #        any state.db that already existed from Phase A/B. Observed live
 #        on a state.db that had survived the A→C transition.
-SCHEMA_VERSION: int = 2
+#   v3 — Session 2 (trust modes): add pending_intent_json + pending_intent_at
+#        to conversations for the natural-language intent confirmation
+#        flow (60s TTL on a pending confirmation per handle).
+SCHEMA_VERSION: int = 3
 
 
 # v0 schema (what the project shipped pre-Phase-D). New installs leapfrog
@@ -148,6 +151,31 @@ def _ensure_conversations_v2_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_conversations_v3_columns(conn: sqlite3.Connection) -> None:
+    """v2 → v3. Add ``pending_intent_json`` and ``pending_intent_at`` to
+    ``conversations`` for the NL-intent confirmation flow.
+
+    The bridge stores a pending confirmation per handle (60s TTL): when
+    the user says "kill the bridge" the bridge stashes the intended
+    command + timestamp here, replies with a paraphrase, and waits for
+    "yes"/"no". The columns hold the JSON-serialized command spec and
+    the ISO timestamp the confirmation was offered.
+
+    Idempotent — only ALTERs columns that don't already exist.
+    """
+    existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(conversations)")
+    }
+    if "pending_intent_json" not in existing:
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN pending_intent_json TEXT"
+        )
+    if "pending_intent_at" not in existing:
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN pending_intent_at TEXT"
+        )
+
+
 def _apply_schema(conn: sqlite3.Connection) -> None:
     """Apply schema migrations forward to ``SCHEMA_VERSION``.
 
@@ -180,6 +208,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         if current < 2:
             _ensure_conversations_v2_columns(conn)
             current = 2
+        if current < 3:
+            _ensure_conversations_v3_columns(conn)
+            current = 3
 
         # Any gap between the last registered step and SCHEMA_VERSION
         # means a maintainer bumped the version without adding a step.
@@ -365,6 +396,12 @@ def set_last_options(
 
 LAST_OPTIONS_TTL_SECONDS = 30 * 60  # 30 min — stale picks aren't honored
 
+# Pending NL-intent confirmation TTL. 60s is short on purpose: if you say
+# "kill the bridge" and then immediately drift to another conversation,
+# we want the confirmation to expire so you don't "yes" something
+# unrelated later.
+PENDING_INTENT_TTL_SECONDS = 60
+
 
 def get_last_options(
     handle: str, *, state_dir: Path = DEFAULT_STATE_DIR
@@ -393,6 +430,87 @@ def get_last_options(
             return json.loads(row["last_options_json"])
         except json.JSONDecodeError:
             return []
+
+
+def set_pending_intent(
+    handle: str,
+    command: str,
+    extra_arg: str = "",
+    *,
+    state_dir: Path = DEFAULT_STATE_DIR,
+) -> None:
+    """Stash a pending NL-intent confirmation for ``handle``.
+
+    The next inbound message from this handle will be matched against
+    confirmation patterns (yes/no/cancel). If yes → the stored
+    ``command`` (+ optional ``extra_arg``) executes. If no/anything else
+    → pending is cleared and the message is processed normally.
+
+    Stale entries (older than PENDING_INTENT_TTL_SECONDS) are dropped
+    by ``get_pending_intent``. There's no separate prune — TTL is
+    enforced at read time.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    payload = json.dumps({"command": command, "extra_arg": extra_arg})
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO conversations "
+            "  (handle, pending_intent_json, pending_intent_at, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(handle) DO UPDATE SET "
+            "  pending_intent_json = excluded.pending_intent_json, "
+            "  pending_intent_at = excluded.pending_intent_at, "
+            "  updated_at = excluded.updated_at",
+            (handle, payload, now, now),
+        )
+
+
+def get_pending_intent(
+    handle: str, *, state_dir: Path = DEFAULT_STATE_DIR
+) -> Optional[dict]:
+    """Return ``{"command": str, "extra_arg": str}`` or None.
+
+    None means no pending confirmation OR the pending one has aged out
+    past PENDING_INTENT_TTL_SECONDS. Aged-out entries are NOT auto-
+    deleted from the row — the next ``set_pending_intent`` (or
+    ``clear_pending_intent``) overwrites them.
+    """
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT pending_intent_json, pending_intent_at "
+            "FROM conversations WHERE handle = ?",
+            (handle,),
+        ).fetchone()
+        if not row or not row["pending_intent_json"] or not row["pending_intent_at"]:
+            return None
+        try:
+            pending_at = datetime.fromisoformat(row["pending_intent_at"])
+        except (TypeError, ValueError):
+            return None
+        if (datetime.now(timezone.utc) - pending_at).total_seconds() > PENDING_INTENT_TTL_SECONDS:
+            return None
+        try:
+            payload = json.loads(row["pending_intent_json"])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict) or "command" not in payload:
+            return None
+        return payload
+
+
+def clear_pending_intent(
+    handle: str, *, state_dir: Path = DEFAULT_STATE_DIR
+) -> None:
+    """NULL out the pending intent for ``handle`` (post-execution or cancel)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with connection(state_dir) as conn:
+        conn.execute(
+            "UPDATE conversations "
+            "SET pending_intent_json = NULL, pending_intent_at = NULL, "
+            "    updated_at = ? "
+            "WHERE handle = ?",
+            (now, handle),
+        )
 
 
 def audit(

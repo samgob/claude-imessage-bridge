@@ -202,6 +202,80 @@ def test_last_options_corrupt_json_returns_empty(state_dir: Path):
     assert state.get_last_options(handle, state_dir=state_dir) == []
 
 
+# --- Pending NL-intent confirmations (schema v3) ------------------------
+
+def test_pending_intent_none_default(state_dir: Path):
+    state.init_state_dir(state_dir)
+    assert state.get_pending_intent("+15551234567", state_dir=state_dir) is None
+
+
+def test_pending_intent_set_and_get(state_dir: Path):
+    state.set_pending_intent("+15551234567", "/halt", state_dir=state_dir)
+    pending = state.get_pending_intent("+15551234567", state_dir=state_dir)
+    assert pending == {"command": "/halt", "extra_arg": ""}
+
+
+def test_pending_intent_with_extra_arg(state_dir: Path):
+    state.set_pending_intent(
+        "+15551234567", "/use", "wesco", state_dir=state_dir,
+    )
+    pending = state.get_pending_intent("+15551234567", state_dir=state_dir)
+    assert pending == {"command": "/use", "extra_arg": "wesco"}
+
+
+def test_pending_intent_ttl_expires(state_dir: Path):
+    """After PENDING_INTENT_TTL_SECONDS, the pending intent is treated as gone."""
+    handle = "+15551234567"
+    state.set_pending_intent(handle, "/halt", state_dir=state_dir)
+    # Backdate the timestamp past the TTL.
+    old = (datetime.now(timezone.utc) - timedelta(
+        seconds=state.PENDING_INTENT_TTL_SECONDS + 5)
+    ).isoformat()
+    with state.connection(state_dir) as conn:
+        conn.execute(
+            "UPDATE conversations SET pending_intent_at = ? WHERE handle = ?",
+            (old, handle),
+        )
+    assert state.get_pending_intent(handle, state_dir=state_dir) is None
+
+
+def test_pending_intent_corrupt_json_returns_none(state_dir: Path):
+    handle = "+15551234567"
+    state.set_pending_intent(handle, "/halt", state_dir=state_dir)
+    now = datetime.now(timezone.utc).isoformat()
+    with state.connection(state_dir) as conn:
+        conn.execute(
+            "UPDATE conversations SET pending_intent_json = ?, "
+            "pending_intent_at = ? WHERE handle = ?",
+            ("not-json", now, handle),
+        )
+    assert state.get_pending_intent(handle, state_dir=state_dir) is None
+
+
+def test_clear_pending_intent_nulls_columns(state_dir: Path):
+    handle = "+15551234567"
+    state.set_pending_intent(handle, "/halt", state_dir=state_dir)
+    state.clear_pending_intent(handle, state_dir=state_dir)
+    assert state.get_pending_intent(handle, state_dir=state_dir) is None
+    # Verify the columns are actually NULL (not the TTL path):
+    with state.connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT pending_intent_json, pending_intent_at "
+            "FROM conversations WHERE handle = ?", (handle,),
+        ).fetchone()
+    assert row["pending_intent_json"] is None
+    assert row["pending_intent_at"] is None
+
+
+def test_set_pending_intent_overwrites(state_dir: Path):
+    """A second set_pending_intent replaces the first cleanly."""
+    handle = "+15551234567"
+    state.set_pending_intent(handle, "/halt", state_dir=state_dir)
+    state.set_pending_intent(handle, "/pause", state_dir=state_dir)
+    pending = state.get_pending_intent(handle, state_dir=state_dir)
+    assert pending["command"] == "/pause"
+
+
 # --- Circuit breaker / failure tracking --------------------------------
 
 def test_failure_counter_default_zero(state_dir: Path):

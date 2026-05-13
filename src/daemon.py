@@ -37,6 +37,7 @@ from . import config as config_mod
 from . import health
 from . import imessage_reader
 from . import imessage_sender
+from . import intents
 from . import memory as memory_mod
 from . import state
 from . import trust as trust_mod
@@ -298,13 +299,94 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         )
         return
 
+    # --- Natural-language intent + confirmation flow ------------------
+    #
+    # If we have a pending confirmation for this handle (60s TTL),
+    # interpret the body as yes/no/anything-else. Otherwise, run the
+    # intent classifier on plain-text bodies; if it matches a
+    # destructive intent, stash a pending confirmation; if it matches a
+    # read-only intent, synthesize the equivalent /command and fall
+    # through to the existing /command dispatch.
+
+    body_for_dispatch = msg.body  # may be rewritten by intent flow
+
+    pending = state.get_pending_intent(norm)
+    if pending is not None:
+        if intents.is_confirmation_yes(msg.body):
+            # Execute the pending command by rewriting the body and
+            # falling through to /command dispatch below.
+            extra = pending.get("extra_arg", "")
+            body_for_dispatch = pending["command"]
+            if extra:
+                body_for_dispatch = body_for_dispatch + " " + extra
+            state.clear_pending_intent(norm)
+            _metrics["intent_confirmed"] += 1
+        elif intents.is_confirmation_no(msg.body):
+            state.clear_pending_intent(norm)
+            try:
+                imessage_sender.send(
+                    imessage_sender.SendRequest(handle=norm, body="Cancelled."),
+                )
+                _record_self_send(norm, "Cancelled.")
+                state.audit(
+                    handle_redacted=redacted, direction="out", kind="reply",
+                    detail="intent-cancelled",
+                    chatdb_rowid=msg.rowid,
+                    cost_cents=0,
+                )
+            except imessage_sender.SendError as e:
+                logger.error("intent-cancel send failed: %s", e)
+            return
+        else:
+            # Anything else: treat the pending as implicitly cancelled
+            # and process this message normally.
+            state.clear_pending_intent(norm)
+            _metrics["intent_implicitly_cancelled"] += 1
+
+    # If still no pending was matched, try classifying this body.
+    if not commands_mod.is_command(body_for_dispatch):
+        intent = intents.classify_intent(body_for_dispatch)
+        if intent is not None:
+            if intent.destructive:
+                # Stash pending; reply with paraphrase; return.
+                state.set_pending_intent(
+                    norm, intent.command, intent.extra_arg or "",
+                )
+                _metrics["intent_pending_confirmation"] += 1
+                try:
+                    imessage_sender.send(
+                        imessage_sender.SendRequest(
+                            handle=norm, body=intent.paraphrase,
+                        ),
+                    )
+                    _record_self_send(norm, intent.paraphrase)
+                    state.audit(
+                        handle_redacted=redacted, direction="out", kind="reply",
+                        detail=f"intent-confirm-req:{intent.command}",
+                        chatdb_rowid=msg.rowid,
+                        cost_cents=0,
+                    )
+                except imessage_sender.SendError as e:
+                    logger.error("intent paraphrase send failed: %s", e)
+                return
+            # Read-only intent: synthesize the slash command and let the
+            # /command path execute it below.
+            body_for_dispatch = intent.command
+            if intent.extra_arg:
+                body_for_dispatch = body_for_dispatch + " " + intent.extra_arg
+            _metrics["intent_executed_readonly"] += 1
+
     # Command path: /-prefixed messages dispatch to commands.py instead
     # of claude. Commands are cheap (no LLM call, no cost), so they
     # don't run through the cost cap or claude_runner.
-    if commands_mod.is_command(msg.body):
+    #
+    # ``body_for_dispatch`` may have been rewritten upstream by the
+    # natural-language intent layer (e.g., "how's it going" became
+    # "/status") — use it, not msg.body, for the dispatch.
+    if commands_mod.is_command(body_for_dispatch):
         try:
             cmd_result = commands_mod.parse_and_dispatch(
-                msg.body,
+                body_for_dispatch,
                 handle=norm,
                 state_dir=state.DEFAULT_STATE_DIR,
                 aliases=cfg.session_aliases,
@@ -332,7 +414,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             _metrics["cmd_replies"] += 1
             state.audit(
                 handle_redacted=redacted, direction="out", kind="reply",
-                detail=f"cmd={msg.body.split()[0]}",
+                detail=f"cmd={body_for_dispatch.split()[0]}",
                 reply_bytes=len(cmd_result.reply.encode("utf-8")),
                 chatdb_rowid=msg.rowid,
                 cost_cents=0,
