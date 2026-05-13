@@ -298,6 +298,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
                 handle=norm,
                 state_dir=state.DEFAULT_STATE_DIR,
                 aliases=cfg.session_aliases,
+                cfg=cfg,
             )
         except Exception as e:
             logger.exception("command dispatch crashed: %s", e)

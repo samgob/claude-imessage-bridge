@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -451,3 +452,191 @@ def test_help_mentions_pause_resume(state_dir: Path):
     r = commands.parse_and_dispatch("/help", handle=HANDLE, state_dir=state_dir)
     assert "/pause" in r.reply
     assert "/resume" in r.reply
+
+
+# --- /cost-today --------------------------------------------------------
+
+def _fake_cfg(**overrides):
+    base = {
+        "daily_cost_cap_usd": 5.0,
+        "project_directory": Path("/Users/sam/Desktop/Claude Homebase"),
+        "session_aliases": {},
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_cost_today_with_no_spend(state_dir: Path):
+    r = commands.parse_and_dispatch(
+        "/cost-today", handle=HANDLE, state_dir=state_dir, cfg=_fake_cfg(),
+    )
+    assert "$0.00" in r.reply
+    assert "$5.00" in r.reply
+    assert "0.0%" in r.reply
+    assert "$5.00 remaining" in r.reply
+    assert "00:00 UTC" in r.reply
+
+
+def test_cost_today_after_spend(state_dir: Path):
+    state.add_cost_cents(123, state_dir=state_dir)  # $1.23
+    r = commands.parse_and_dispatch(
+        "/cost-today", handle=HANDLE, state_dir=state_dir, cfg=_fake_cfg(),
+    )
+    assert "$1.23" in r.reply
+    # Spend is 24.6% of $5.00 cap. Formatted to 1 decimal.
+    assert "24.6%" in r.reply
+    assert "$3.77 remaining" in r.reply
+
+
+def test_cost_today_no_cfg_falls_back_gracefully(state_dir: Path):
+    state.add_cost_cents(50, state_dir=state_dir)
+    r = commands.parse_and_dispatch(
+        "/cost-today", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "$0.50" in r.reply
+    assert "cap unavailable" in r.reply
+
+
+# --- /whoami -----------------------------------------------------------
+
+def test_whoami_redacts_handle(state_dir: Path):
+    r = commands.parse_and_dispatch(
+        "/whoami", handle=HANDLE, state_dir=state_dir, cfg=_fake_cfg(),
+    )
+    # +15551234567 should be redacted to +15***67 form
+    assert HANDLE not in r.reply
+    assert "+15***67" in r.reply
+    assert "Project dir:" in r.reply
+    assert "Session: none" in r.reply
+
+
+def test_whoami_with_active_session_no_alias(state_dir: Path, monkeypatch):
+    state.set_current_session(HANDLE, "abcd1234-x", state_dir=state_dir)
+    monkeypatch.setattr(
+        session_discovery, "find_by_id",
+        lambda sid: _mk_session(sid, snippet="x"),
+    )
+    r = commands.parse_and_dispatch(
+        "/whoami", handle=HANDLE, state_dir=state_dir, cfg=_fake_cfg(),
+    )
+    assert "abcd1234" in r.reply
+    assert "alias: none" in r.reply
+
+
+def test_whoami_with_active_session_alias_match(state_dir: Path, monkeypatch):
+    sid = "4fe39c70-21d7-467e-801b-ca3167ac130f"
+    aliases = {"wesco": sid}
+    state.set_current_session(HANDLE, sid, state_dir=state_dir)
+    monkeypatch.setattr(
+        session_discovery, "find_by_id",
+        lambda s: _mk_session(s, snippet="x"),
+    )
+    r = commands.parse_and_dispatch(
+        "/whoami", handle=HANDLE, state_dir=state_dir,
+        aliases=aliases, cfg=_fake_cfg(),
+    )
+    assert "alias: wesco" in r.reply
+
+
+def test_whoami_session_gone_from_disk(state_dir: Path, monkeypatch):
+    state.set_current_session(HANDLE, "vanished-sid", state_dir=state_dir)
+    monkeypatch.setattr(session_discovery, "find_by_id", lambda sid: None)
+    r = commands.parse_and_dispatch(
+        "/whoami", handle=HANDLE, state_dir=state_dir, cfg=_fake_cfg(),
+    )
+    assert "gone-from-disk" in r.reply
+
+
+# --- /tail-audit -------------------------------------------------------
+
+def test_tail_audit_empty(state_dir: Path):
+    r = commands.parse_and_dispatch(
+        "/tail-audit", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "No audit events" in r.reply
+
+
+def test_tail_audit_default_n_10(state_dir: Path):
+    # Write 15 rows; default tail should show 10.
+    for i in range(15):
+        state.audit(
+            handle_redacted=f"+15***{i:02d}",
+            direction="in", kind="text",
+            detail=f"event-{i}",
+            chatdb_rowid=i, state_dir=state_dir,
+        )
+    r = commands.parse_and_dispatch(
+        "/tail-audit", handle=HANDLE, state_dir=state_dir,
+    )
+    # Default 10 rows + header line
+    assert "Last 10 audit events:" in r.reply
+    assert r.reply.count("\n") == 10  # header + 10 rows = 11 lines, 10 \n
+
+
+def test_tail_audit_custom_n(state_dir: Path):
+    for i in range(5):
+        state.audit(
+            handle_redacted="+15***99", direction="in", kind="text",
+            detail=f"e-{i}", chatdb_rowid=i, state_dir=state_dir,
+        )
+    r = commands.parse_and_dispatch(
+        "/tail-audit 3", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "Last 3 audit events:" in r.reply
+
+
+def test_tail_audit_redacts_handles(state_dir: Path):
+    """The handle_redacted column is already redacted by design; verify
+    we don't accidentally expose raw handles."""
+    raw_handle = "+15551234567"  # full E.164, must NOT appear
+    state.audit(
+        handle_redacted="+15***67",  # what the daemon stores
+        direction="in", kind="text",
+        detail="hello", chatdb_rowid=1, state_dir=state_dir,
+    )
+    r = commands.parse_and_dispatch(
+        "/tail-audit", handle=HANDLE, state_dir=state_dir,
+    )
+    assert raw_handle not in r.reply
+    assert "+15***67" in r.reply
+
+
+def test_tail_audit_rejects_non_int(state_dir: Path):
+    r = commands.parse_and_dispatch(
+        "/tail-audit abc", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "Not a number" in r.reply
+
+
+def test_tail_audit_caps_huge_n(state_dir: Path):
+    """N > 100 is capped to 100 to avoid huge replies."""
+    for i in range(120):
+        state.audit(
+            handle_redacted="+15***99", direction="in", kind="text",
+            detail=f"e-{i}", chatdb_rowid=i, state_dir=state_dir,
+        )
+    r = commands.parse_and_dispatch(
+        "/tail-audit 9999", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "Last 100 audit events:" in r.reply
+
+
+def test_tail_audit_state_helper(state_dir: Path):
+    """Direct test of state.tail_audit_rows."""
+    for i in range(3):
+        state.audit(
+            handle_redacted="+15***00", direction="in", kind="text",
+            detail=f"e{i}", chatdb_rowid=i, state_dir=state_dir,
+        )
+    rows = state.tail_audit_rows(2, state_dir=state_dir)
+    assert len(rows) == 2
+    # Newest first
+    assert rows[0]["detail"] == "e2"
+    assert rows[1]["detail"] == "e1"
+
+
+def test_help_mentions_new_commands(state_dir: Path):
+    r = commands.parse_and_dispatch("/help", handle=HANDLE, state_dir=state_dir)
+    assert "/cost-today" in r.reply
+    assert "/whoami" in r.reply
+    assert "/tail-audit" in r.reply

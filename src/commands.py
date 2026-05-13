@@ -14,9 +14,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from . import session_discovery, state
+from . import imessage_sender, session_discovery, state
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +45,19 @@ def parse_and_dispatch(
     handle: str,
     state_dir: Path,
     aliases: Optional[Dict[str, str]] = None,
+    cfg: Any = None,
 ) -> CommandResult:
     """Parse a /command and return its CommandResult.
 
     ``aliases`` is the session-alias map from config (name → session UUID,
     keys already case-folded). Used by /use and /aliases. None means
     "no aliases configured" — the dispatcher behaves as it did pre-aliases.
+
+    ``cfg`` is the full Config object (used by /cost-today, /whoami).
+    Optional so tests that only exercise the simple commands can keep
+    omitting it. If a command that needs cfg is invoked without it, that
+    command's handler returns a helpful "internal: cfg not available"
+    reply rather than crashing.
     """
     if aliases is None:
         aliases = {}
@@ -81,6 +88,14 @@ def parse_and_dispatch(
         return _pause(state_dir=state_dir, reason=arg)
     if cmd == "/resume":
         return _resume(state_dir=state_dir)
+    if cmd == "/cost-today":
+        return _cost_today(state_dir=state_dir, cfg=cfg)
+    if cmd == "/whoami":
+        return _whoami(
+            handle=handle, state_dir=state_dir, aliases=aliases, cfg=cfg,
+        )
+    if cmd == "/tail-audit":
+        return _tail_audit(state_dir=state_dir, raw_arg=arg)
     return CommandResult(
         reply=(
             f"Unknown command {cmd!r}. Try /help for the list, or send a "
@@ -101,6 +116,9 @@ def _help() -> CommandResult:
         "/aliases — list configured session aliases\n"
         "/pause [reason] — pause the bridge (Claude calls suspended)\n"
         "/resume — resume the bridge\n"
+        "/cost-today — daily spend vs. cap\n"
+        "/whoami — your handle + active session/alias + project dir\n"
+        "/tail-audit [N] — last N audit rows (default 10)\n"
         "\n"
         "Anything else continues your current session."
     ))
@@ -335,6 +353,110 @@ def _pick(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:
         ),
         set_session_id=info.session_id,
     )
+
+
+def _cost_today(*, state_dir: Path, cfg: Any) -> CommandResult:
+    """Daily spend / cap, no claude call."""
+    cents = state.today_cost_cents(state_dir=state_dir)
+    if cfg is None:
+        return CommandResult(reply=(
+            f"Today: ${cents / 100:.2f} spent. (cap unavailable — cfg "
+            "not passed to dispatcher)"
+        ))
+    cap_usd = float(cfg.daily_cost_cap_usd)
+    cap_cents = int(round(cap_usd * 100)) or 1
+    pct = (cents / cap_cents) * 100 if cap_cents else 0.0
+    remaining = max(0, cap_cents - cents) / 100.0
+    return CommandResult(reply=(
+        f"Today: ${cents / 100:.2f} of ${cap_usd:.2f} cap "
+        f"({pct:.1f}%, ${remaining:.2f} remaining).\n"
+        f"Resets at 00:00 UTC."
+    ))
+
+
+def _whoami(
+    *,
+    handle: str,
+    state_dir: Path,
+    aliases: Dict[str, str],
+    cfg: Any,
+) -> CommandResult:
+    """Redacted handle + active session + active alias + project_directory."""
+    redacted = imessage_sender._redact_handle(handle)  # noqa: SLF001
+    sid = state.get_current_session(handle, state_dir=state_dir)
+    if not sid:
+        sess_line = "Session: none"
+    else:
+        info = session_discovery.find_by_id(sid)
+        # Reverse-lookup: is this active session id one of the aliases?
+        alias_name = None
+        for name, alias_sid in aliases.items():
+            if alias_sid == sid:
+                alias_name = name
+                break
+        alias_str = alias_name or "none"
+        if info is None:
+            sess_line = f"Session: {sid[:8]} (alias: {alias_str}) · gone-from-disk"
+        else:
+            sess_line = (
+                f"Session: {info.short_id} (alias: {alias_str}) · "
+                f"{info.relative_age()} ago"
+            )
+    if cfg is None:
+        proj_line = "Project dir: (unknown — cfg not passed to dispatcher)"
+    else:
+        proj_line = f"Project dir: {cfg.project_directory}"
+    return CommandResult(reply=(
+        f"You: {redacted}\n"
+        f"{sess_line}\n"
+        f"{proj_line}"
+    ))
+
+
+def _tail_audit(*, state_dir: Path, raw_arg: str) -> CommandResult:
+    """Last N audit rows, redacted handle column already by design.
+
+    Output is capped at imessage_sender.MAX_REPLY_BYTES — the sender will
+    truncate further if we somehow exceed, but we trim here first so the
+    reply is meaningful.
+    """
+    n = 10
+    if raw_arg:
+        try:
+            n = int(raw_arg.split()[0])
+        except (ValueError, IndexError):
+            return CommandResult(reply=(
+                f"Not a number: {raw_arg!r}. Usage: /tail-audit [N] (default 10)."
+            ))
+    if n < 1:
+        n = 1
+    if n > 100:
+        n = 100
+
+    rows = state.tail_audit_rows(n, state_dir=state_dir)
+    if not rows:
+        return CommandResult(reply="No audit events recorded yet.")
+
+    lines = [f"Last {len(rows)} audit events:"]
+    for row in rows:
+        # Compact line: HH:MM:SS dir kind handle detail
+        ts = (row.get("ts") or "")[-9:-1] if row.get("ts") else "?"  # HH:MM:SS
+        direction = (row.get("direction") or "?")[:3]
+        kind = (row.get("kind") or "?")[:7]
+        handle_red = row.get("handle_redacted") or "?"
+        detail = (row.get("detail") or "")[:60]
+        lines.append(f"{ts} {direction:<3} {kind:<7} {handle_red} {detail}")
+
+    body = "\n".join(lines)
+    # Defense-in-depth cap below the sender's 8KB hard limit.
+    cap = imessage_sender.MAX_REPLY_BYTES - 200  # leave room for truncation marker
+    encoded = body.encode("utf-8")
+    if len(encoded) > cap:
+        cut = cap
+        while cut > 0 and (encoded[cut] & 0xC0) == 0x80:
+            cut -= 1
+        body = encoded[:cut].decode("utf-8", errors="ignore") + "\n…[truncated]"
+    return CommandResult(reply=body)
 
 
 def _build_options_result(

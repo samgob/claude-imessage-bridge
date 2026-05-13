@@ -433,6 +433,29 @@ def audit(
         )
 
 
+def tail_audit_rows(
+    n: int = 10, *, state_dir: Path = DEFAULT_STATE_DIR
+) -> list[dict]:
+    """Return the last ``n`` audit rows, newest first.
+
+    Each row is a dict mirroring the audit_log columns. ``handle_redacted``
+    is already the redacted form by design — no PII to scrub here. Used
+    by /tail-audit; never exposes the raw body (we don't store it).
+    """
+    if n < 1:
+        n = 1
+    if n > 500:
+        n = 500
+    with connection(state_dir) as conn:
+        cursor = conn.execute(
+            "SELECT ts, handle_redacted, direction, kind, detail, "
+            "reply_bytes, chatdb_rowid, cost_cents, error_category "
+            "FROM audit_log ORDER BY rowid DESC LIMIT ?",
+            (n,),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
 # --- Rate limiting --------------------------------------------------------
 
 def _bucket(ts: Optional[float] = None) -> str:
