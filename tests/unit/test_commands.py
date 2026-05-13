@@ -640,3 +640,73 @@ def test_help_mentions_new_commands(state_dir: Path):
     assert "/cost-today" in r.reply
     assert "/whoami" in r.reply
     assert "/tail-audit" in r.reply
+    assert "/sources" in r.reply
+    assert "/last" in r.reply
+    assert "/halt" in r.reply
+
+
+def test_help_advertises_natural_language(state_dir: Path):
+    r = commands.parse_and_dispatch("/help", handle=HANDLE, state_dir=state_dir)
+    # The non-developer-friendly framing.
+    assert "Natural language" in r.reply
+
+
+# --- /sources -----------------------------------------------------------
+
+def test_sources_empty_when_no_memory_loaded(state_dir: Path, monkeypatch):
+    """If daemon._last_memory_sources is empty, /sources says so."""
+    from src import daemon as daemon_mod
+    monkeypatch.setattr(daemon_mod, "_last_memory_sources", [])
+    r = commands.parse_and_dispatch("/sources", handle=HANDLE, state_dir=state_dir)
+    assert "No memory context" in r.reply
+
+
+def test_sources_lists_loaded_files(state_dir: Path, monkeypatch):
+    from src import daemon as daemon_mod
+    monkeypatch.setattr(
+        daemon_mod, "_last_memory_sources",
+        [
+            ("/Users/sam/.claude/CLAUDE.md", 5234),
+            ("/Users/sam/.claude/memory/projects/wesco.md", 2841),
+        ],
+    )
+    r = commands.parse_and_dispatch("/sources", handle=HANDLE, state_dir=state_dir)
+    assert "CLAUDE.md" in r.reply
+    assert "wesco.md" in r.reply
+    assert "5,234 bytes" in r.reply
+    assert "Total:" in r.reply
+
+
+# --- /last --------------------------------------------------------------
+
+def test_last_no_history(state_dir: Path):
+    state.init_state_dir(state_dir)
+    r = commands.parse_and_dispatch("/last", handle=HANDLE, state_dir=state_dir)
+    assert "No claude calls" in r.reply
+
+
+def test_last_reports_most_recent_claude_call(state_dir: Path):
+    state.init_state_dir(state_dir)
+    # Add a few audit rows; the most recent claude-reply should win.
+    state.audit(
+        handle_redacted="abc***", direction="in", kind="text",
+        detail="ok", chatdb_rowid=1, state_dir=state_dir,
+    )
+    state.audit(
+        handle_redacted="abc***", direction="out", kind="reply",
+        detail="ok dur=1234ms cost_cents=5 sid=abc12345",
+        reply_bytes=42, chatdb_rowid=1, cost_cents=5, state_dir=state_dir,
+    )
+    r = commands.parse_and_dispatch("/last", handle=HANDLE, state_dir=state_dir)
+    assert "1234ms" in r.reply
+    assert "$0.05" in r.reply
+    assert "42" in r.reply  # reply_bytes
+
+
+# --- /halt --------------------------------------------------------------
+
+def test_halt_sets_flag(state_dir: Path):
+    r = commands.parse_and_dispatch("/halt", handle=HANDLE, state_dir=state_dir)
+    assert r.halt_after_send is True
+    assert "Daemon halting" in r.reply
+    assert "Terminal" in r.reply

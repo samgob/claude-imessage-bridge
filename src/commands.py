@@ -32,6 +32,10 @@ class CommandResult:
     # If True, the daemon clears the per-handle session pointer regardless
     # of set_session_id. Used by /new.
     clear_session: bool = False
+    # If True, after sending this reply, the daemon should HALT (clean
+    # exit + STOP file). Used by /halt. Restart requires manual operator
+    # action at the Terminal.
+    halt_after_send: bool = False
 
 
 # Coarse classification — does this body look like a command?
@@ -96,6 +100,12 @@ def parse_and_dispatch(
         )
     if cmd == "/tail-audit":
         return _tail_audit(state_dir=state_dir, raw_arg=arg)
+    if cmd == "/sources":
+        return _sources()
+    if cmd == "/last":
+        return _last(state_dir=state_dir)
+    if cmd == "/halt":
+        return _halt()
     return CommandResult(
         reply=(
             f"Unknown command {cmd!r}. Try /help for the list, or send a "
@@ -116,9 +126,15 @@ def _help() -> CommandResult:
         "/aliases — list configured session aliases\n"
         "/pause [reason] — pause the bridge (Claude calls suspended)\n"
         "/resume — resume the bridge\n"
+        "/halt — exit the daemon (requires Terminal to restart)\n"
         "/cost-today — daily spend vs. cap\n"
         "/whoami — your handle + active session/alias + project dir\n"
+        "/sources — files loaded by the memory backend for the last call\n"
+        "/last — summary of the last claude call (tools, duration, cost)\n"
         "/tail-audit [N] — last N audit rows (default 10)\n"
+        "\n"
+        "Natural language works too — try 'how much have I spent today'\n"
+        "or 'kill the bridge'. Destructive actions ask before doing.\n"
         "\n"
         "Anything else continues your current session."
     ))
@@ -457,6 +473,83 @@ def _tail_audit(*, state_dir: Path, raw_arg: str) -> CommandResult:
             cut -= 1
         body = encoded[:cut].decode("utf-8", errors="ignore") + "\n…[truncated]"
     return CommandResult(reply=body)
+
+
+def _sources() -> CommandResult:
+    """List the memory-backend sources that fed the last claude call.
+
+    Reads ``daemon._last_memory_sources``, which the daemon's _handle_one
+    populates on every memory-backend-non-none call. If the list is
+    empty, either no memory backend is active OR the last call was a
+    command path (no memory injection).
+    """
+    # Lazy import to avoid daemon→commands→daemon circular at module load.
+    from . import daemon as daemon_mod
+    sources = list(daemon_mod._last_memory_sources)
+    if not sources:
+        return CommandResult(reply=(
+            "No memory context loaded for the last call.\n"
+            "(memory backend is either 'none' or last input was a command.)"
+        ))
+    lines = ["Last query loaded:"]
+    total = 0
+    for path, bytes_loaded in sources:
+        # Trim to filename + immediate parent dir for readability.
+        p = Path(path)
+        try:
+            display = str(p.relative_to(Path.home()))
+            display = "~/" + display
+        except ValueError:
+            display = path
+        lines.append(f"  {display} ({bytes_loaded:,} bytes)")
+        total += bytes_loaded
+    lines.append(f"Total: {total:,} bytes")
+    return CommandResult(reply="\n".join(lines))
+
+
+def _last(*, state_dir: Path) -> CommandResult:
+    """Summary of the most recent successful claude call from audit_log.
+
+    Pulls the latest ``direction='out' AND kind='reply' AND
+    detail LIKE 'ok %'`` row and formats its structured detail fields
+    for human reading.
+    """
+    rows = state.tail_audit_rows(20, state_dir=state_dir)
+    # Find the most recent claude reply (vs. command reply).
+    for row in rows:
+        detail = row.get("detail") or ""
+        if (row.get("direction") == "out"
+                and row.get("kind") == "reply"
+                and detail.startswith("ok ")):
+            ts = row.get("ts") or "?"
+            cost_cents = row.get("cost_cents")
+            cost_str = f"${(cost_cents or 0) / 100:.4f}" if cost_cents is not None else "?"
+            # detail looks like "ok dur=1234ms cost_cents=5 sid=abc12345"
+            return CommandResult(reply=(
+                f"Last claude call: {ts}\n"
+                f"  {detail}\n"
+                f"  cost: {cost_str}\n"
+                f"  bytes replied: {row.get('reply_bytes') or 0}"
+            ))
+    return CommandResult(reply=(
+        "No claude calls found in recent audit history. Send a message "
+        "to claude first."
+    ))
+
+
+def _halt() -> CommandResult:
+    """Request a clean daemon exit. Daemon enforces via the
+    ``halt_after_send`` flag on the CommandResult — it sends the reply,
+    then exits.
+    """
+    return CommandResult(
+        reply=(
+            "⏹ Daemon halting. Restart with `python3 -m src.daemon` in "
+            "Terminal. (Cross-device session continuity is preserved — "
+            "your session ids are intact in state.db.)"
+        ),
+        halt_after_send=True,
+    )
 
 
 def _build_options_result(

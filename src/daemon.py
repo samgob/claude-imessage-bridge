@@ -427,6 +427,20 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
                 detail=f"cmd-send-error:{type(e).__name__}",
                 chatdb_rowid=msg.rowid,
             )
+
+        # /halt — clean daemon exit after the reply is sent. Signal the
+        # main loop via _running=False AND create a STOP file (belt and
+        # suspenders — STOP file also signals any concurrent loop reader).
+        if cmd_result.halt_after_send:
+            global _running
+            _running = False
+            try:
+                (state.DEFAULT_STATE_DIR / "STOP").write_text(
+                    "halted via iMessage /halt command\n"
+                )
+            except OSError as e:
+                logger.warning("could not create STOP file: %s", e)
+            logger.warning("HALT requested via /halt — daemon will exit")
         return
 
     # PAUSE gate: applied ONLY to the claude-invocation path. Commands
