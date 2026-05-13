@@ -31,6 +31,7 @@ from collections import Counter, deque
 from pathlib import Path
 from typing import Deque, Optional, Tuple
 
+from . import backups
 from . import claude_runner
 from . import commands as commands_mod
 from . import config as config_mod
@@ -909,6 +910,12 @@ def main(argv: list[str] | None = None) -> int:
         if now - last_prune > 600:
             state.prune_reply_counter()
             last_prune = now
+            # Daily backup check piggybacks on the 10-minute prune tick.
+            # run_if_due is cheap when not actually due.
+            try:
+                backups.run_if_due(state_dir)
+            except Exception as e:
+                logger.warning("backup check failed: %s", e)
         if now - last_heartbeat > HEARTBEAT_INTERVAL_SECONDS:
             _heartbeat(
                 state_dir=state_dir,
