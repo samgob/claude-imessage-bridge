@@ -281,3 +281,34 @@ def test_skip_selftest_refused_when_not_tty(monkeypatch, tmp_path, fake_claude_b
 
     rc = daemon.main(["--config", str(cfg_path), "--skip-selftest"])
     assert rc == 6
+
+
+# --- Pause refactor: claude path gated, command path not -------------
+
+def test_read_pause_reason_returns_first_line(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "PAUSE").write_text("manual via /pause\nextra context line\n")
+    assert daemon._read_pause_reason(state_dir) == "manual via /pause"
+
+
+def test_read_pause_reason_empty_when_absent(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    assert daemon._read_pause_reason(state_dir) == ""
+
+
+def test_daemon_main_loop_no_longer_top_level_pause_check():
+    """Regression guard. The top-of-loop ``if _is_paused`` short-circuit was
+    removed so command dispatch (incl. /resume) still runs while paused.
+    If a future refactor restores it, /resume becomes unreachable via
+    iMessage — guard the refactor with this test."""
+    import inspect
+    source = inspect.getsource(daemon.main)
+    # The string "PAUSE file present, idling" used to be the top-of-loop
+    # log line. Its absence is the invariant we care about.
+    assert "PAUSE file present, idling" not in source, (
+        "Top-of-loop pause short-circuit was re-added — that breaks "
+        "/resume reachability over iMessage. The pause check should "
+        "live inside _handle_one, gating only the claude-invocation path."
+    )

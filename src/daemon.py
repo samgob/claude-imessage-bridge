@@ -336,6 +336,33 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             )
         return
 
+    # PAUSE gate: applied ONLY to the claude-invocation path. Commands
+    # were already dispatched above, so /resume, /status, /help work
+    # while paused. Plain-text messages (non-commands) get a notice and
+    # are dropped — they'd otherwise invoke claude.
+    if _is_paused(state.DEFAULT_STATE_DIR):
+        _metrics["paused_drops"] += 1
+        logger.info("PAUSE active; dropping non-command message from %s", redacted)
+        pause_reason = _read_pause_reason(state.DEFAULT_STATE_DIR)
+        notice = (
+            "⏸ Bridge paused — your message wasn't sent to Claude. "
+            "Send /resume to restart."
+        )
+        if pause_reason:
+            notice += f" (reason: {pause_reason})"
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(handle=norm, body=notice),
+            )
+            _record_self_send(norm, notice)
+        except imessage_sender.SendError:
+            pass
+        state.audit(
+            handle_redacted=redacted, direction="out", kind="drop",
+            detail="paused", chatdb_rowid=msg.rowid,
+        )
+        return
+
     # Daily cost cap check BEFORE invoking claude. If we're already over
     # the cap, refuse and tell the user. The cap is meant to be a defense
     # against a compromised contact burning the budget, so it's deliberate
@@ -525,6 +552,16 @@ def _is_paused(state_dir: Path) -> bool:
     return (state_dir / "PAUSE").exists()
 
 
+def _read_pause_reason(state_dir: Path) -> str:
+    """Return the first line of the PAUSE file (if present), else ''."""
+    pause = state_dir / "PAUSE"
+    try:
+        text = pause.read_text(encoding="utf-8", errors="replace")
+    except (OSError, FileNotFoundError):
+        return ""
+    return text.splitlines()[0].strip() if text else ""
+
+
 def _stop_requested(state_dir: Path) -> bool:
     if (state_dir / "STOP").exists():
         logger.warning("STOP file present at %s — exiting cleanly", state_dir / "STOP")
@@ -671,11 +708,12 @@ def main(argv: list[str] | None = None) -> int:
         if _stop_requested(state_dir):
             break
 
-        if _is_paused(state_dir):
-            logger.info("PAUSE file present, idling")
-            time.sleep(poll)
-            continue
-
+        # NOTE: We no longer short-circuit the whole loop when PAUSE is
+        # present. _handle_one's claude-invocation path checks pause
+        # state itself and refuses the claude call, but command-dispatch
+        # still runs — so /resume, /status, /help can be sent while
+        # paused. Without this, /resume would be impossible over iMessage
+        # once the bridge tripped its own circuit breaker.
         try:
             new_messages = list(imessage_reader.fetch_new_messages(cursor))
         except Exception as e:

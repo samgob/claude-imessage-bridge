@@ -77,6 +77,10 @@ def parse_and_dispatch(
         return _status(handle=handle, state_dir=state_dir)
     if cmd == "/aliases":
         return _aliases(aliases=aliases)
+    if cmd == "/pause":
+        return _pause(state_dir=state_dir, reason=arg)
+    if cmd == "/resume":
+        return _resume(state_dir=state_dir)
     return CommandResult(
         reply=(
             f"Unknown command {cmd!r}. Try /help for the list, or send a "
@@ -95,6 +99,8 @@ def _help() -> CommandResult:
         "/use <query> — alias or keyword search; resumes a session\n"
         "/pick <N> — switch to a numbered match from the last list\n"
         "/aliases — list configured session aliases\n"
+        "/pause [reason] — pause the bridge (Claude calls suspended)\n"
+        "/resume — resume the bridge\n"
         "\n"
         "Anything else continues your current session."
     ))
@@ -108,19 +114,67 @@ def _new() -> CommandResult:
 
 
 def _status(*, handle: str, state_dir: Path) -> CommandResult:
+    paused_line = ""
+    pause_file = state_dir / "PAUSE"
+    if pause_file.exists():
+        try:
+            reason = pause_file.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+            first = reason[0].strip() if reason else ""
+        except OSError:
+            first = ""
+        paused_line = (
+            f"⏸ Paused (reason: {first or 'unknown'}). Send /resume to restart.\n"
+        )
+
     sid = state.get_current_session(handle, state_dir=state_dir)
     if not sid:
-        return CommandResult(reply="No active session — your next message starts a fresh one.")
+        return CommandResult(reply=(
+            f"{paused_line}No active session — your next message starts a fresh one."
+        ))
     info = session_discovery.find_by_id(sid)
     if info is None:
         return CommandResult(reply=(
-            f"Active session: {sid[:8]} — but the transcript file is no "
-            "longer on disk. Your next message starts a fresh session."
+            f"{paused_line}Active session: {sid[:8]} — but the transcript "
+            "file is no longer on disk. Your next message starts a fresh "
+            "session."
         ))
     return CommandResult(reply=(
-        f"Active session: {info.short_id} · {info.relative_age()} ago\n"
+        f"{paused_line}Active session: {info.short_id} · "
+        f"{info.relative_age()} ago\n"
         f"Last user msg: {info.snippet[:120]}"
     ))
+
+
+def _pause(*, state_dir: Path, reason: str = "") -> CommandResult:
+    """Create the PAUSE file. Idempotent: re-pausing rewrites the reason."""
+    final_reason = reason.strip() or "manual via /pause"
+    state.trip_pause(state_dir=state_dir, reason=final_reason)
+    return CommandResult(reply=(
+        f"⏸ Bridge paused. Send /resume to restart. Reason: {final_reason}"
+    ))
+
+
+def _resume(*, state_dir: Path) -> CommandResult:
+    """Remove the PAUSE file. No-op message if not currently paused."""
+    pause_file = state_dir / "PAUSE"
+    if not pause_file.exists():
+        return CommandResult(reply=(
+            "Bridge wasn't paused (no PAUSE file). Nothing to do."
+        ))
+    try:
+        pause_file.unlink()
+    except OSError as e:
+        logger.error("could not remove PAUSE file: %s", e)
+        return CommandResult(reply=(
+            "⚠️ Tried to resume but couldn't remove PAUSE file. "
+            "Check daemon logs."
+        ))
+    # Reset the consecutive-failure counter so a circuit-breaker-tripped
+    # PAUSE doesn't immediately re-trip on the next failure.
+    state.reset_claude_failures(state_dir=state_dir)
+    return CommandResult(reply="▶ Bridge resumed.")
 
 
 def _sessions(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:

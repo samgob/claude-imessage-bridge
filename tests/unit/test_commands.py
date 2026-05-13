@@ -381,3 +381,73 @@ def test_aliases_lists_with_age_and_snippet(state_dir: Path, monkeypatch):
 def test_help_mentions_aliases(state_dir: Path):
     r = commands.parse_and_dispatch("/help", handle=HANDLE, state_dir=state_dir)
     assert "/aliases" in r.reply
+
+
+# --- /pause and /resume ------------------------------------------------
+
+def test_pause_creates_pause_file(state_dir: Path):
+    r = commands.parse_and_dispatch(
+        "/pause", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "paused" in r.reply.lower()
+    pause = state_dir / "PAUSE"
+    assert pause.exists()
+    assert "manual via /pause" in pause.read_text()
+
+
+def test_pause_with_reason(state_dir: Path):
+    r = commands.parse_and_dispatch(
+        "/pause testing the system overnight",
+        handle=HANDLE, state_dir=state_dir,
+    )
+    assert "testing the system overnight" in r.reply
+    pause = state_dir / "PAUSE"
+    assert "testing the system overnight" in pause.read_text()
+
+
+def test_resume_removes_pause_file(state_dir: Path):
+    state.trip_pause(state_dir=state_dir, reason="test")
+    assert (state_dir / "PAUSE").exists()
+    r = commands.parse_and_dispatch(
+        "/resume", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "resumed" in r.reply.lower()
+    assert not (state_dir / "PAUSE").exists()
+
+
+def test_resume_no_op_when_not_paused(state_dir: Path):
+    assert not (state_dir / "PAUSE").exists()
+    r = commands.parse_and_dispatch(
+        "/resume", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "wasn't paused" in r.reply
+    assert "Nothing to do" in r.reply
+
+
+def test_resume_resets_consecutive_failures(state_dir: Path):
+    """After /resume, the circuit-breaker counter resets — otherwise a
+    /resume after a circuit-breaker-tripped pause would immediately re-trip
+    on the next failure."""
+    state.trip_pause(state_dir=state_dir, reason="auto: 5 consecutive failures")
+    # Simulate accumulated failures
+    state.record_claude_failure(state_dir=state_dir)
+    state.record_claude_failure(state_dir=state_dir)
+    state.record_claude_failure(state_dir=state_dir)
+    assert state.get_consecutive_failures(state_dir=state_dir) >= 3
+    commands.parse_and_dispatch("/resume", handle=HANDLE, state_dir=state_dir)
+    assert state.get_consecutive_failures(state_dir=state_dir) == 0
+
+
+def test_status_surfaces_pause_reason(state_dir: Path, monkeypatch):
+    state.trip_pause(state_dir=state_dir, reason="manual via /pause")
+    r = commands.parse_and_dispatch(
+        "/status", handle=HANDLE, state_dir=state_dir,
+    )
+    assert "Paused" in r.reply
+    assert "manual via /pause" in r.reply
+
+
+def test_help_mentions_pause_resume(state_dir: Path):
+    r = commands.parse_and_dispatch("/help", handle=HANDLE, state_dir=state_dir)
+    assert "/pause" in r.reply
+    assert "/resume" in r.reply
