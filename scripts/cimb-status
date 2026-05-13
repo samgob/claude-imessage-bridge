@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""cimb-status — human-readable claude-imessage-bridge daemon status.
+
+Reads ``~/.claude-imessage-bridge/status.json`` (written atomically by the
+daemon every heartbeat tick) and prints a compact block.
+
+Exit codes:
+  0  printed status (possibly with a STALE warning)
+  2  status.json not found — daemon hasn't run yet
+  3  status.json exists but couldn't be parsed
+
+Usage: ``python3 scripts/cimb-status``
+
+Standalone — no project import. Works against the on-disk file only so it
+can be run from cron / shell without setting up the package.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+# Mirror src/daemon.py:HEARTBEAT_INTERVAL_SECONDS. Hard-coded here so the
+# script remains import-free; bump in lockstep if the daemon's constant
+# changes. The test asserts they match.
+HEARTBEAT_INTERVAL_SECONDS = 300
+
+DEFAULT_STATUS_PATH = Path.home() / ".claude-imessage-bridge" / "status.json"
+
+
+def _human_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    return f"{int(seconds / 3600)}h ago"
+
+
+def _format_status(payload: dict, age_seconds: float) -> str:
+    pid = payload.get("pid", "?")
+    paused = payload.get("paused", False)
+    stop_req = payload.get("stop_requested", False)
+    cursor = payload.get("cursor", "?")
+    cost_cents = int(payload.get("daily_cost_cents", 0))
+    cap_cents = int(payload.get("daily_cost_cap_cents", 0)) or 1
+    pct = (cost_cents / cap_cents) * 100 if cap_cents else 0
+    remaining_cents = max(0, cap_cents - cost_cents)
+    consec = payload.get("consecutive_failures", 0)
+    schema = payload.get("schema_db_version", "?")
+    metrics = payload.get("metrics", {}) or {}
+    state_str = "stopping" if stop_req else "running"
+    paused_str = "yes" if paused else "no"
+
+    lines = []
+    if age_seconds > 2 * HEARTBEAT_INTERVAL_SECONDS:
+        lines.append(
+            "WARN STALE: heartbeat is "
+            f"{int(age_seconds / 60)} minutes old "
+            f"(expected < {int(2 * HEARTBEAT_INTERVAL_SECONDS / 60)})"
+        )
+    lines.append("claude-imessage-bridge — daemon status")
+    lines.append(f"  pid:                  {pid}")
+    lines.append(f"  state:                {state_str} (paused: {paused_str})")
+    lines.append(f"  last heartbeat:       {_human_age(age_seconds)}")
+    lines.append(f"  cursor:               {cursor}")
+    lines.append(
+        f"  daily cost:           ${cost_cents / 100:.2f} of "
+        f"${cap_cents / 100:.2f} cap   "
+        f"({pct:.1f}% used, ${remaining_cents / 100:.2f} remaining)"
+    )
+    lines.append(f"  consecutive errors:   {consec}")
+    lines.append(f"  schema version:       {schema}")
+    if metrics:
+        metric_parts = "  ".join(
+            f"{k}: {v}" for k, v in sorted(metrics.items())
+        )
+        lines.append("  metrics (since last heartbeat):")
+        lines.append(f"    {metric_parts}")
+    else:
+        lines.append("  metrics (since last heartbeat):  (none)")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    path_str = (argv or [])[0] if argv else os.environ.get("CIMB_STATUS_PATH")
+    status_path = Path(path_str) if path_str else DEFAULT_STATUS_PATH
+    if not status_path.exists():
+        print(
+            f"status.json not found at {status_path} — daemon hasn't run yet?",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        text = status_path.read_text(encoding="utf-8")
+        payload = json.loads(text)
+    except (OSError, ValueError) as e:
+        print(f"failed to read {status_path}: {e}", file=sys.stderr)
+        return 3
+
+    try:
+        mtime = status_path.stat().st_mtime
+        age = max(0.0, time.time() - mtime)
+    except OSError:
+        age = 0.0
+
+    print(_format_status(payload, age))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
