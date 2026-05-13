@@ -138,6 +138,52 @@ def test_normalize_for_allowlist_invalid_returns_empty():
 
 # --- Audit-row redaction regression (round-4 adversarial finding) ------
 
+def test_self_send_echo_recorded_and_detected():
+    """Track outbound bodies in the in-memory ring; the same (handle, body)
+    coming back inbound (via iCloud Messages sync to the user's other
+    device) must be detected and skipped."""
+    # Reset the ring deterministically.
+    daemon._recent_self_sends.clear()
+
+    handle = "+15551234567"
+    body = "Hey Sam! How can I help you today?"
+    assert not daemon._is_recent_self_send(handle, body)
+
+    daemon._record_self_send(handle, body)
+    assert daemon._is_recent_self_send(handle, body)
+    # Different handle must NOT collide on body hash.
+    assert not daemon._is_recent_self_send("+15559999999", body)
+    # Different body must NOT collide on handle.
+    assert not daemon._is_recent_self_send(handle, body + " extra")
+
+
+def test_self_send_echo_ttl_expires(monkeypatch):
+    """An echo recorded long enough ago must NOT count as a self-send."""
+    daemon._recent_self_sends.clear()
+    handle = "+15551234567"
+    body = "ok"
+    daemon._record_self_send(handle, body)
+    assert daemon._is_recent_self_send(handle, body)
+
+    # Pretend time advanced past the TTL.
+    real_time = daemon.time.time
+    monkeypatch.setattr(
+        daemon.time, "time",
+        lambda: real_time() + daemon.RECENT_SELF_SEND_TTL_SECONDS + 1,
+    )
+    assert not daemon._is_recent_self_send(handle, body)
+
+
+def test_self_send_ring_bounded():
+    """The ring buffer is bounded so a long-running daemon doesn't grow
+    memory without bound."""
+    daemon._recent_self_sends.clear()
+    handle = "+15551234567"
+    for i in range(daemon.RECENT_SELF_SEND_CAP + 50):
+        daemon._record_self_send(handle, f"msg {i}")
+    assert len(daemon._recent_self_sends) <= daemon.RECENT_SELF_SEND_CAP
+
+
 def test_audit_failure_detail_string_redacted():
     """The audit detail string for a claude failure MUST NOT contain the
     raw error string or the consecutive-failure count.

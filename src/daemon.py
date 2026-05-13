@@ -21,14 +21,15 @@ persisted in a Time Machine backup of state.db.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import signal
 import sys
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
-from typing import Optional
+from typing import Deque, Optional, Tuple
 
 from . import claude_runner
 from . import commands as commands_mod
@@ -46,6 +47,51 @@ HEARTBEAT_INTERVAL_SECONDS = 300
 
 _running = True
 _metrics = Counter()
+
+
+# --- Self-chat echo prevention ------------------------------------------
+#
+# When the user messages themselves (single Apple-ID, two devices), the
+# bridge's outbound replies are written to the Mac's chat.db as
+# ``is_from_me=1`` (correctly filtered at the SQL layer). BUT the iPhone
+# also receives the reply, records it in its own chat.db, and iCloud
+# Messages sync pushes a copy back to the Mac as ``is_from_me=0`` —
+# indistinguishable from the user typing the same thing. Without
+# deduplication this creates a reply loop.
+#
+# Mitigation: track the (handle, body) pairs we sent in the last
+# RECENT_SELF_SEND_TTL_SECONDS in an in-memory deque, and skip any
+# inbound row that matches. Body is hashed; we don't store plaintext.
+#
+# False-negative cost: if the user happens to send a message that
+# exactly matches a bridge reply within the TTL window, the bridge will
+# ignore it. Acceptable.
+
+RECENT_SELF_SEND_TTL_SECONDS: int = 180
+RECENT_SELF_SEND_CAP: int = 256  # bounded; old entries fall off
+_recent_self_sends: Deque[Tuple[float, str, str]] = deque(maxlen=RECENT_SELF_SEND_CAP)
+
+
+def _body_digest(body: str) -> str:
+    """Stable short hash of an outgoing body, for echo dedupe."""
+    return hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _record_self_send(handle: str, body: str) -> None:
+    """Note that the bridge just sent ``body`` to ``handle``."""
+    _recent_self_sends.append((time.time(), handle, _body_digest(body)))
+
+
+def _is_recent_self_send(handle: str, body: str) -> bool:
+    """True if (handle, body) matches a send we made within the TTL window."""
+    now = time.time()
+    cutoff = now - RECENT_SELF_SEND_TTL_SECONDS
+    # Prune the head of the deque (oldest entries). The deque is bounded
+    # by maxlen so this is cheap.
+    while _recent_self_sends and _recent_self_sends[0][0] < cutoff:
+        _recent_self_sends.popleft()
+    target = _body_digest(body)
+    return any(h == handle and bh == target for _, h, bh in _recent_self_sends)
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +249,26 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         _metrics["drops_" + reason] += 1
         return
 
+    # Self-chat echo dedupe. When user messages themselves, iCloud sync
+    # bounces our outbound reply back as is_from_me=0 on the Mac. Skip
+    # rows whose body matches a reply we sent to this handle in the last
+    # RECENT_SELF_SEND_TTL_SECONDS — otherwise we'd reply to our own
+    # reply, ad infinitum (observed in the first live test).
+    if _is_recent_self_send(norm, msg.body):
+        _metrics["self_send_echoes_skipped"] += 1
+        logger.info(
+            "skipping self-send echo from %s (rowid=%d)",
+            redacted, msg.rowid,
+        )
+        state.audit(
+            handle_redacted=redacted,
+            direction="in",
+            kind="drop",
+            detail="self-send-echo",
+            chatdb_rowid=msg.rowid,
+        )
+        return
+
     # Rate-limit: reserve a slot atomically (handles TOCTOU at the SQL layer).
     granted, count = state.reserve_reply_slot(
         norm, cfg.reply_rate_limit_per_minute
@@ -250,6 +316,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             imessage_sender.send(
                 imessage_sender.SendRequest(handle=norm, body=cmd_result.reply),
             )
+            _record_self_send(norm, cmd_result.reply)
             _metrics["cmd_replies"] += 1
             state.audit(
                 handle_redacted=redacted, direction="out", kind="reply",
@@ -279,16 +346,15 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             "daily cost cap reached ($%.2f) — refusing claude invocation",
             cfg.daily_cost_cap_usd,
         )
+        cap_body = (
+            f"⚠️ Daily cost cap reached (${cfg.daily_cost_cap_usd:.2f}). "
+            "Resets at 00:00 UTC. Edit config.yaml to raise."
+        )
         try:
             imessage_sender.send(
-                imessage_sender.SendRequest(
-                    handle=norm,
-                    body=(
-                        f"⚠️ Daily cost cap reached (${cfg.daily_cost_cap_usd:.2f}). "
-                        "Resets at 00:00 UTC. Edit config.yaml to raise."
-                    ),
-                ),
+                imessage_sender.SendRequest(handle=norm, body=cap_body),
             )
+            _record_self_send(norm, cap_body)
         except imessage_sender.SendError:
             pass
         state.audit(
@@ -354,18 +420,17 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             chatdb_rowid=msg.rowid,
             cost_cents=cents,
         )
+        per_call_cap_body = (
+            "⚠️ Reply suppressed — that response cost "
+            f"${result.cost_usd:.2f} (cap is "
+            f"${cfg.per_call_cost_cap_usd:.2f}). Try a "
+            "shorter prompt."
+        )
         try:
             imessage_sender.send(
-                imessage_sender.SendRequest(
-                    handle=norm,
-                    body=(
-                        "⚠️ Reply suppressed — that response cost "
-                        f"${result.cost_usd:.2f} (cap is "
-                        f"${cfg.per_call_cost_cap_usd:.2f}). Try a "
-                        "shorter prompt."
-                    ),
-                ),
+                imessage_sender.SendRequest(handle=norm, body=per_call_cap_body),
             )
+            _record_self_send(norm, per_call_cap_body)
         except imessage_sender.SendError:
             pass
         return
@@ -424,6 +489,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             imessage_sender.SendRequest(handle=norm, body=reply_body),
             dry_run=False,
         )
+        _record_self_send(norm, reply_body)
         _metrics["replies"] += 1
         _metrics["cost_cents"] += cents
         state.audit(
