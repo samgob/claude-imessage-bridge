@@ -178,6 +178,13 @@ _ENV_ALLOWLIST: Final = frozenset({
     "CLAUDE_CODE_OAUTH_TOKEN",
 })
 
+# Claude Code records every session as a JSONL transcript at
+# ``~/.claude/projects/<encoded-cwd>/<session_id>.jsonl``. The encoded
+# directory name is the cwd with ``/`` replaced by ``-`` (and spaces also
+# become ``-`` — the encoding is lossy, but we control the cwd so we
+# compute the encoding forward, never reverse it).
+DEFAULT_PROJECTS_ROOT: Final = Path.home() / ".claude" / "projects"
+
 
 @dataclass(frozen=True)
 class ClaudeResult:
@@ -290,6 +297,64 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         )
 
 
+def _encode_cwd_for_projects(sandbox_cwd: Path) -> str:
+    """Compute the ``~/.claude/projects/<dir>`` name Claude Code uses for
+    a given cwd. Matches Claude's encoding: ``/`` → ``-`` (and spaces also
+    become ``-`` — we don't reverse, we forward-compute).
+    """
+    s = str(sandbox_cwd)
+    return s.replace("/", "-").replace(" ", "-")
+
+
+def _cleanup_sandbox_session(
+    sandbox_cwd: Path,
+    session_id: Optional[str],
+    *,
+    projects_root: Path = DEFAULT_PROJECTS_ROOT,
+) -> None:
+    """Delete the bridge-internal JSONL Claude wrote for this call.
+
+    Each ``claude -p`` call appends a JSONL transcript to
+    ``<projects_root>/<encoded-cwd>/<session_id>.jsonl``. For hermetic
+    per-call sandboxes (cimb-call-*) and selftests (cimb-selftest-*),
+    that transcript is plumbing — never user-meaningful — and the
+    bridge's session-discovery filter already excludes it from
+    /sessions. But leaving the file on disk grows ``~/.claude/projects``
+    by one tiny JSONL per inbound message; a long-running daemon
+    accumulates thousands.
+
+    This helper is best-effort. All ``OSError``s are swallowed; cleanup
+    is not load-bearing. We also try to rmdir the parent dir afterwards
+    in case it's now empty (Claude doesn't reuse it after the cwd is
+    gone).
+
+    Refuses to operate on a session id that contains path separators or
+    parent-dir tokens — a malformed id from claude could otherwise
+    escape the projects tree. The same defense applies to the encoded
+    dir name.
+    """
+    if not session_id:
+        return
+    # Defense against a malformed session id (path traversal). Real
+    # Claude session ids are UUIDs; we accept hex + dash only.
+    if "/" in session_id or ".." in session_id or "\\" in session_id:
+        return
+    encoded = _encode_cwd_for_projects(sandbox_cwd)
+    if "/" in encoded or ".." in encoded:
+        return
+    target = projects_root / encoded / f"{session_id}.jsonl"
+    try:
+        target.unlink()
+    except OSError:
+        pass
+    # Best-effort: remove parent if now empty. Don't recurse — only the
+    # immediate parent.
+    try:
+        target.parent.rmdir()
+    except OSError:
+        pass
+
+
 def _write_empty_mcp_safe(path: Path) -> None:
     """Write the empty-mcp.json content to ``path`` without following symlinks.
 
@@ -367,18 +432,30 @@ def run_claude(
     # Per-call hermetic sandbox: fresh tempdir + fresh empty-mcp.json. Both
     # vanish when the context exits. mode=0o700 is the default for
     # TemporaryDirectory on POSIX.
+    #
+    # We capture ``sandbox_for_cleanup`` so that AFTER the TemporaryDirectory
+    # context exits (and the tempdir itself is gone), we can still compute
+    # the encoded ~/.claude/projects/<dir> name and remove the bridge-internal
+    # JSONL Claude wrote during this call. Tempdir cleanup is for the call's
+    # own scratch; ~/.claude/projects cleanup is a separate concern that the
+    # tempdir context can't help us with.
+    sandbox_for_cleanup: Optional[Path] = None
+    result: ClaudeResult
     with tempfile.TemporaryDirectory(prefix="cimb-call-") as sandbox_str:
         sandbox = Path(sandbox_str)
+        sandbox_for_cleanup = sandbox
         mcp_path = sandbox / "empty-mcp.json"
         try:
             _write_empty_mcp_safe(mcp_path)
         except OSError as e:
-            return ClaudeResult(
+            result = ClaudeResult(
                 success=False, reply="", session_id=None, cost_usd=0.0,
                 duration_ms=int((time.time() - start) * 1000),
                 error=f"could not write empty-mcp.json: {e}",
                 error_category="exec_error",
             )
+            # No session was created (claude didn't start) — nothing to clean.
+            return result
 
         argv = [
             claude_bin,
@@ -428,6 +505,7 @@ def run_claude(
                 start_new_session=True,
             )
         except OSError as e:
+            # Spawn failed; no JSONL was written. Nothing to clean up.
             return ClaudeResult(
                 success=False, reply="", session_id=None, cost_usd=0.0,
                 duration_ms=int((time.time() - start) * 1000),
@@ -445,6 +523,9 @@ def run_claude(
             duration = int((time.time() - start) * 1000)
             logger.warning("claude -p timeout after %ds; killed process group",
                            timeout_seconds)
+            # A timeout may have left a partial JSONL on disk; the session
+            # id is unknown to us here (claude didn't return one). Nothing
+            # to clean up by id — leave it.
             return ClaudeResult(
                 success=False, reply="", session_id=None, cost_usd=0.0,
                 duration_ms=duration,
@@ -452,71 +533,95 @@ def run_claude(
                 error_category="timeout",
             )
 
+    # ``with`` context exited: sandbox tempdir is gone. ``sandbox_for_cleanup``
+    # still holds the path we computed inside, which is what
+    # _cleanup_sandbox_session uses to derive the encoded ~/.claude/projects
+    # dir name.
     duration = int((time.time() - start) * 1000)
-
-    if proc.returncode != 0:
-        # Log full stderr server-side; never echo to user (it may include
-        # paths, MCP server names, traceback fragments — see review S3).
-        logger.warning("claude -p exit=%d stderr_tail=%r",
-                       proc.returncode, (stderr or "")[-500:])
-        return ClaudeResult(
-            success=False, reply="", session_id=None, cost_usd=0.0,
-            duration_ms=duration,
-            error=f"claude exit {proc.returncode}",
-            error_category="exec_error",
-        )
+    session_id_for_cleanup: Optional[str] = None
 
     try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError as e:
-        logger.warning("claude JSON parse failed: %s; stdout_head=%r",
-                       e, (stdout or "")[:500])
+        if proc.returncode != 0:
+            # Log full stderr server-side; never echo to user (it may include
+            # paths, MCP server names, traceback fragments — see review S3).
+            logger.warning("claude -p exit=%d stderr_tail=%r",
+                           proc.returncode, (stderr or "")[-500:])
+            return ClaudeResult(
+                success=False, reply="", session_id=None, cost_usd=0.0,
+                duration_ms=duration,
+                error=f"claude exit {proc.returncode}",
+                error_category="exec_error",
+            )
+
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("claude JSON parse failed: %s; stdout_head=%r",
+                           e, (stdout or "")[:500])
+            return ClaudeResult(
+                success=False, reply="", session_id=None, cost_usd=0.0,
+                duration_ms=duration,
+                error=f"json parse failed: {e}",
+                error_category="json_parse",
+            )
+
+        if not isinstance(parsed, dict):
+            return ClaudeResult(
+                success=False, reply="", session_id=None, cost_usd=0.0,
+                duration_ms=duration,
+                error="claude JSON output was not a dict",
+                error_category="json_parse",
+            )
+
+        # Capture the session id for cleanup even on the is_error path —
+        # claude may have written a partial transcript before reporting
+        # the error.
+        sid_raw = parsed.get("session_id")
+        if isinstance(sid_raw, str):
+            session_id_for_cleanup = sid_raw
+
+        # Some claude error shapes come back with is_error=True instead of a
+        # non-zero exit. Detect those.
+        if parsed.get("is_error"):
+            return ClaudeResult(
+                success=False, reply="", session_id=None, cost_usd=0.0,
+                duration_ms=duration,
+                error=f"claude reported is_error: {parsed.get('subtype','?')}",
+                error_category="claude_error",
+            )
+
+        reply = parsed.get("result") or parsed.get("response") or ""
+        if not isinstance(reply, str):
+            reply = str(reply)
+
+        cost_raw = parsed.get("total_cost_usd")
+        try:
+            cost_usd = float(cost_raw) if cost_raw is not None else 0.0
+        except (TypeError, ValueError):
+            cost_usd = 0.0
+
+        session_id = session_id_for_cleanup
+
         return ClaudeResult(
-            success=False, reply="", session_id=None, cost_usd=0.0,
+            success=True,
+            reply=reply,
+            session_id=session_id,
+            cost_usd=cost_usd,
             duration_ms=duration,
-            error=f"json parse failed: {e}",
-            error_category="json_parse",
         )
-
-    if not isinstance(parsed, dict):
-        return ClaudeResult(
-            success=False, reply="", session_id=None, cost_usd=0.0,
-            duration_ms=duration,
-            error="claude JSON output was not a dict",
-            error_category="json_parse",
-        )
-
-    # Some claude error shapes come back with is_error=True instead of a
-    # non-zero exit. Detect those.
-    if parsed.get("is_error"):
-        return ClaudeResult(
-            success=False, reply="", session_id=None, cost_usd=0.0,
-            duration_ms=duration,
-            error=f"claude reported is_error: {parsed.get('subtype','?')}",
-            error_category="claude_error",
-        )
-
-    reply = parsed.get("result") or parsed.get("response") or ""
-    if not isinstance(reply, str):
-        reply = str(reply)
-
-    cost_raw = parsed.get("total_cost_usd")
-    try:
-        cost_usd = float(cost_raw) if cost_raw is not None else 0.0
-    except (TypeError, ValueError):
-        cost_usd = 0.0
-
-    session_id = parsed.get("session_id")
-    if session_id is not None and not isinstance(session_id, str):
-        session_id = None
-
-    return ClaudeResult(
-        success=True,
-        reply=reply,
-        session_id=session_id,
-        cost_usd=cost_usd,
-        duration_ms=duration,
-    )
+    finally:
+        # Cleanup the bridge-internal JSONL transcript Claude wrote at
+        # ~/.claude/projects/<encoded>/<sid>.jsonl. Runs on every path that
+        # got far enough for claude to write one. Best-effort: OSError
+        # swallowed inside.
+        #
+        # Resolve the projects root via module attribute lookup (not the
+        # default arg) so tests can monkeypatch claude_runner.DEFAULT_PROJECTS_ROOT.
+        if sandbox_for_cleanup is not None:
+            _cleanup_sandbox_session(
+                sandbox_for_cleanup, session_id_for_cleanup,
+                projects_root=DEFAULT_PROJECTS_ROOT,
+            )
 
 
 # --- Startup self-test ----------------------------------------------------
@@ -587,3 +692,15 @@ def selftest_bash_denied(
             "selftest: bash denied (canary absent, cost=$%.4f, duration=%dms)",
             result.cost_usd, result.duration_ms,
         )
+
+    # The selftest's claude call wrote a JSONL transcript under
+    # ~/.claude/projects/<encoded-cimb-call-dir>/<sid>.jsonl — and
+    # ``run_claude`` already cleaned that up internally. Belt-and-suspenders:
+    # if a future refactor moves the cleanup away from ``run_claude``,
+    # call it explicitly here too so selftest sessions don't accumulate.
+    if result.session_id and st_dir is not None:
+        # The selftest's outer tempdir (cimb-selftest-*) is different from
+        # the per-call inner sandbox (cimb-call-*) that run_claude uses,
+        # so this cleanup is a no-op in the current code path. Documented
+        # for forward-compatibility.
+        _cleanup_sandbox_session(st_dir, result.session_id)

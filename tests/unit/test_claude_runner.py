@@ -494,6 +494,122 @@ def test_hard_forbidden_subset_of_hard_disallowed():
     )
 
 
+# --- _encode_cwd_for_projects / _cleanup_sandbox_session -----------------
+
+def test_encode_cwd_for_projects_replaces_slashes():
+    """Claude's encoding turns / into - in the projects/ subdir name."""
+    encoded = claude_runner._encode_cwd_for_projects(
+        Path("/private/var/folders/abc/T/cimb-call-XXXX")
+    )
+    assert encoded == "-private-var-folders-abc-T-cimb-call-XXXX"
+
+
+def test_encode_cwd_for_projects_replaces_spaces():
+    """Spaces also become - in Claude's encoding (lossy)."""
+    encoded = claude_runner._encode_cwd_for_projects(
+        Path("/Users/me/Desktop/With Spaces")
+    )
+    assert encoded == "-Users-me-Desktop-With-Spaces"
+
+
+def test_cleanup_sandbox_session_removes_jsonl(tmp_path: Path):
+    """A simulated ~/.claude/projects/<encoded>/<sid>.jsonl is removed."""
+    sandbox_cwd = Path("/tmp/cimb-call-fake1234")
+    sid = "abcdef01-2345-6789-abcd-ef0123456789"
+    projects_root = tmp_path / "projects"
+    encoded = claude_runner._encode_cwd_for_projects(sandbox_cwd)
+    project_dir = projects_root / encoded
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / f"{sid}.jsonl"
+    jsonl.write_text('{"type":"user","content":"hi"}\n')
+    assert jsonl.exists()
+
+    claude_runner._cleanup_sandbox_session(
+        sandbox_cwd, sid, projects_root=projects_root,
+    )
+
+    assert not jsonl.exists()
+    # Parent dir was empty, should also be gone (best-effort rmdir).
+    assert not project_dir.exists()
+
+
+def test_cleanup_sandbox_session_silent_on_missing_file(tmp_path: Path):
+    """No JSONL on disk = no-op, no exception."""
+    sandbox_cwd = Path("/tmp/cimb-call-vanished")
+    sid = "abcdef01-2345-6789-abcd-ef0123456789"
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    # Should not raise.
+    claude_runner._cleanup_sandbox_session(
+        sandbox_cwd, sid, projects_root=projects_root,
+    )
+
+
+def test_cleanup_sandbox_session_skips_when_no_session_id(tmp_path: Path):
+    """Falsy session_id = nothing to clean. Must not touch disk."""
+    sandbox_cwd = Path("/tmp/cimb-call-xxx")
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    claude_runner._cleanup_sandbox_session(
+        sandbox_cwd, None, projects_root=projects_root,
+    )
+    claude_runner._cleanup_sandbox_session(
+        sandbox_cwd, "", projects_root=projects_root,
+    )
+
+
+def test_cleanup_sandbox_session_refuses_path_traversal_sid(tmp_path: Path):
+    """A claude-returned session id with .. or / must NOT escape the projects tree."""
+    sandbox_cwd = Path("/tmp/cimb-call-xxx")
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("DO NOT TOUCH")
+    # Even though no file matches these patterns under projects_root, the
+    # check is that the function returns without touching disk.
+    claude_runner._cleanup_sandbox_session(
+        sandbox_cwd, "../../../etc/passwd", projects_root=projects_root,
+    )
+    claude_runner._cleanup_sandbox_session(
+        sandbox_cwd, "../victim", projects_root=projects_root,
+    )
+    assert victim.read_text() == "DO NOT TOUCH"
+
+
+def test_run_claude_cleans_up_jsonl_after_call(monkeypatch, fake_claude_binary, tmp_path: Path):
+    """End-to-end: run_claude completing successfully removes the JSONL."""
+    fake_projects = tmp_path / "projects"
+
+    # Capture the sandbox cwd Popen was called with, so we can pre-create the
+    # JSONL file at the same encoded location run_claude will look for.
+    holder: dict = {}
+
+    def fake_popen(argv, **kwargs):
+        holder["cwd"] = kwargs["cwd"]
+        # Pre-create the JSONL that claude would have written.
+        encoded = claude_runner._encode_cwd_for_projects(Path(kwargs["cwd"]))
+        d = fake_projects / encoded
+        d.mkdir(parents=True, exist_ok=True)
+        jsonl = d / "test-sid-9999.jsonl"
+        jsonl.write_text('{"type":"user"}\n')
+        holder["jsonl"] = jsonl
+        return _FakeProc({
+            "result": "hi", "session_id": "test-sid-9999",
+            "total_cost_usd": 0.001,
+        })
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(claude_runner, "DEFAULT_PROJECTS_ROOT", fake_projects)
+
+    r = claude_runner.run_claude(
+        "hi", allowed_tools=[], claude_bin=str(fake_claude_binary),
+    )
+    assert r.success
+    assert r.session_id == "test-sid-9999"
+    # Cleanup must have run after the with-block exit.
+    assert not holder["jsonl"].exists()
+
+
 def test_assert_safe_argv_prefix_consistency():
     """Every bare-flag entry in ARGV_DENYLIST must also be refused in the
     `--flag=value` form. Round-4 finding: the prior hand-rolled prefix list
