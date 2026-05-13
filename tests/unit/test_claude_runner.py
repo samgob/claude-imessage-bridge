@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from src import claude_runner
+from src import claude_runner, trust
 
 
 # --- _validate_tool_list / HARD_FORBIDDEN_TOOLS --------------------------
@@ -185,7 +185,7 @@ def test_run_claude_argv_includes_strict_mcp_and_disallow(
 ):
     result = claude_runner.run_claude(
         "hello",
-        allowed_tools=[],
+        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
     )
     assert result.success
@@ -202,7 +202,7 @@ def test_run_claude_argv_includes_strict_mcp_and_disallow(
 def test_run_claude_argv_has_double_dash_separator(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
         "hello --not-a-flag",
-        allowed_tools=[],
+        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
@@ -216,7 +216,7 @@ def test_run_claude_argv_appends_resume_when_session_given(
 ):
     claude_runner.run_claude(
         "hello",
-        allowed_tools=[],
+        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
         resume_session_id="abc-123",
     )
@@ -230,23 +230,39 @@ def test_run_claude_argv_no_resume_when_session_none(
 ):
     claude_runner.run_claude(
         "hello",
-        allowed_tools=[],
+        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
         resume_session_id=None,
     )
     assert "--resume" not in captured_argv["argv"]
 
 
-def test_run_claude_argv_max_turns_cap(captured_argv, fake_claude_binary):
+def test_run_claude_argv_max_turns_from_preset(captured_argv, fake_claude_binary):
+    """Max turns is now a property of the TrustPreset, not a runtime arg."""
+    # chat_only preset is max_turns=1
     claude_runner.run_claude(
         "hello",
-        allowed_tools=[],
-        max_turns=3,
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
     assert "--max-turns" in argv
-    assert argv[argv.index("--max-turns") + 1] == "3"
+    assert argv[argv.index("--max-turns") + 1] == "1"
+
+
+def test_run_claude_argv_max_turns_full_preset(captured_argv, fake_claude_binary):
+    """Full preset's max_turns=20 must appear in argv."""
+    claude_runner.run_claude(
+        "hello",
+        trust_preset=trust.PRESET_FULL,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+    )
+    argv = captured_argv["argv"]
+    assert argv[argv.index("--max-turns") + 1] == "20"
 
 
 def test_run_claude_argv_includes_anti_fabrication_prompt(
@@ -254,7 +270,7 @@ def test_run_claude_argv_includes_anti_fabrication_prompt(
 ):
     claude_runner.run_claude(
         "hello",
-        allowed_tools=[],
+        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
@@ -272,7 +288,7 @@ def test_run_claude_argv_allowed_tools_filters_disallow(
     """If the user opts into Read, it must NOT appear in --disallowed-tools."""
     claude_runner.run_claude(
         "hello",
-        allowed_tools=["Read"],
+        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=["Read"],
         claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
@@ -286,7 +302,7 @@ def test_run_claude_argv_allowed_tools_filters_disallow(
 
 def test_run_claude_argv_no_dangerous_flags(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
-        "hello", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
     for bad in claude_runner.ARGV_DENYLIST:
@@ -295,7 +311,7 @@ def test_run_claude_argv_no_dangerous_flags(captured_argv, fake_claude_binary):
 
 def test_run_claude_argv_mcp_config_in_sandbox(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
-        "hello", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
     assert "--mcp-config" in argv
@@ -307,7 +323,7 @@ def test_run_claude_argv_mcp_config_in_sandbox(captured_argv, fake_claude_binary
 
 def test_run_claude_argv_cwd_is_sandbox(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
-        "hello", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     cwd = captured_argv["kwargs"]["cwd"]
     # cwd must be the per-call sandbox tempdir, NOT user's project_directory
@@ -319,7 +335,7 @@ def test_run_claude_argv_cwd_is_sandbox(captured_argv, fake_claude_binary):
 def test_run_claude_spawns_with_new_session(captured_argv, fake_claude_binary):
     """``start_new_session=True`` is required for process-group kill."""
     claude_runner.run_claude(
-        "hello", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     assert captured_argv["kwargs"]["start_new_session"] is True
 
@@ -327,7 +343,7 @@ def test_run_claude_spawns_with_new_session(captured_argv, fake_claude_binary):
 def test_run_claude_rejects_forbidden_tool_in_allowed_list(fake_claude_binary):
     with pytest.raises(claude_runner.RunnerConfigError):
         claude_runner.run_claude(
-            "hello", allowed_tools=["Bash"],
+            "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=["Bash"],
             claude_bin=str(fake_claude_binary),
         )
 
@@ -335,7 +351,7 @@ def test_run_claude_rejects_forbidden_tool_in_allowed_list(fake_claude_binary):
 def test_run_claude_rejects_missing_binary(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         claude_runner.run_claude(
-            "hello", allowed_tools=[],
+            "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
             claude_bin=str(tmp_path / "nope"),
         )
 
@@ -351,7 +367,7 @@ def test_run_claude_caps_prompt_length(monkeypatch, fake_claude_binary):
     # 64 KB prompt — well over the 32 KB cap
     big_prompt = "A" * (64 * 1024)
     claude_runner.run_claude(
-        big_prompt, allowed_tools=[], claude_bin=str(fake_claude_binary),
+        big_prompt, trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     sent = holder["argv"][-1]
     assert len(sent.encode("utf-8")) <= claude_runner.MAX_PROMPT_BYTES
@@ -369,7 +385,7 @@ def test_run_claude_returns_session_id_and_cost(monkeypatch, fake_claude_binary)
         }),
     )
     r = claude_runner.run_claude(
-        "hi", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     assert r.success
     assert r.reply == "hello!"
@@ -384,7 +400,7 @@ def test_run_claude_handles_is_error_response(monkeypatch, fake_claude_binary):
         lambda argv, **kw: _FakeProc({"is_error": True, "subtype": "rate_limit"}),
     )
     r = claude_runner.run_claude(
-        "hi", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     assert not r.success
     assert r.error_category == "claude_error"
@@ -399,7 +415,7 @@ def test_run_claude_handles_non_zero_exit(monkeypatch, fake_claude_binary):
         claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
     )
     r = claude_runner.run_claude(
-        "hi", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     assert not r.success
     assert r.error_category == "exec_error"
@@ -414,7 +430,7 @@ def test_run_claude_handles_malformed_json(monkeypatch, fake_claude_binary):
         claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
     )
     r = claude_runner.run_claude(
-        "hi", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     assert not r.success
     assert r.error_category == "json_parse"
@@ -435,7 +451,7 @@ def test_run_claude_handles_timeout(monkeypatch, fake_claude_binary):
     # _kill_process_group will try os.getpgid on a likely-nonexistent pid;
     # that should be silently swallowed.
     r = claude_runner.run_claude(
-        "hi", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
         timeout_seconds=1,
     )
     assert not r.success
@@ -602,7 +618,7 @@ def test_run_claude_cleans_up_jsonl_after_call(monkeypatch, fake_claude_binary, 
     monkeypatch.setattr(claude_runner, "DEFAULT_PROJECTS_ROOT", fake_projects)
 
     r = claude_runner.run_claude(
-        "hi", allowed_tools=[], claude_bin=str(fake_claude_binary),
+        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
     )
     assert r.success
     assert r.session_id == "test-sid-9999"

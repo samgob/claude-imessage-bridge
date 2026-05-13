@@ -56,7 +56,14 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Optional
+from typing import TYPE_CHECKING, Final, Iterable, Optional
+
+if TYPE_CHECKING:
+    # Forward reference only — runtime cycle avoided. ``trust`` imports
+    # FROM this module (for HARD_DISALLOWED + BRIDGE_SYSTEM_PROMPT), so
+    # this module must NOT import ``trust`` at runtime. Type hints use
+    # string forward refs.
+    from .trust import TrustPreset
 
 logger = logging.getLogger(__name__)
 
@@ -239,10 +246,21 @@ def _assert_safe_argv(argv: list[str]) -> None:
                 raise RunnerConfigError(f"refusing argv with denylisted flag form: {tok!r}")
 
 
-def _scrubbed_env() -> dict:
-    """Build a minimal environment for the child process."""
+def _scrubbed_env(extra_passthrough: Iterable[str] = ()) -> dict:
+    """Build a minimal environment for the child process.
+
+    ``extra_passthrough`` is the trust preset's extra environment-variable
+    allowlist — additive on top of ``_ENV_ALLOWLIST``. In ``chat_only``
+    mode this is empty (the strictest scrub). In ``coding`` and ``full``
+    modes it widens to include things like ``GH_TOKEN`` / ``GITHUB_TOKEN``
+    for git operations and a small set of common MCP-server credential
+    env-var names. We deliberately enumerate (not wildcard-pattern-match)
+    so a new env var Sam acquires doesn't silently leak into the bridge
+    until he updates the preset.
+    """
     parent = os.environ
-    env = {k: parent[k] for k in _ENV_ALLOWLIST if k in parent}
+    keys = set(_ENV_ALLOWLIST) | set(extra_passthrough)
+    env = {k: parent[k] for k in keys if k in parent}
     # Always set a sane PATH if not present.
     if "PATH" not in env:
         env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
@@ -375,36 +393,87 @@ def _write_empty_mcp_safe(path: Path) -> None:
         os.close(fd)
 
 
+def _resolve_inherit_mcp_path(configured: Optional[str]) -> Optional[str]:
+    """Resolve the user's MCP config path for ``inherit`` mcp_config_mode.
+
+    Returns the absolute path string. ``None`` means "fall back to empty"
+    — caller should treat the same as ``empty`` mode and warn.
+
+    Refuses symlinks (S9 file-swap defense). Refuses files outside the
+    user's home dir to avoid an arbitrary-path read at config load.
+    """
+    if not configured:
+        configured = str(Path.home() / ".claude" / ".mcp.json")
+    p = Path(configured).expanduser()
+    if not p.is_file():
+        logger.warning(
+            "MCP config inherit path %s does not exist; falling back to empty",
+            p,
+        )
+        return None
+    if p.is_symlink():
+        logger.warning(
+            "MCP config inherit path %s is a symlink; refusing (S9). "
+            "Falling back to empty.",
+            p,
+        )
+        return None
+    try:
+        home = Path.home().resolve()
+        if home not in p.resolve().parents and p.resolve() != home:
+            logger.warning(
+                "MCP config inherit path %s is outside home dir; falling back to empty",
+                p,
+            )
+            return None
+    except OSError:
+        return None
+    return str(p)
+
+
 def run_claude(
     prompt: str,
     *,
-    allowed_tools: list[str],
-    max_turns: int = 1,
+    trust_preset: "TrustPreset",
+    project_directory: Path,
+    allowed_tools_addons: Optional[list[str]] = None,
     timeout_seconds: int = 90,
     claude_bin: str = DEFAULT_CLAUDE_BIN,
     resume_session_id: Optional[str] = None,
+    extra_context: str = "",
 ) -> ClaudeResult:
-    """Invoke ``claude -p`` once in a per-call hermetic sandbox.
+    """Invoke ``claude -p`` once with a TrustPreset-driven invocation.
 
-    Each invocation creates a fresh ``tempfile.TemporaryDirectory`` (mode
-    0o700) and writes a fresh ``empty-mcp.json`` into it before spawning
-    claude. After the call returns (or times out), the directory and any
-    files in it are removed. This kills two attack surfaces in one move:
+    The trust preset gates everything material about the invocation:
+    - cwd (hermetic tempdir vs. project_directory)
+    - MCP config (empty vs. inherit user's real config)
+    - tool deny list
+    - max-turns cap
+    - extra system prompt (chat_only's anti-fabrication; None for others)
+    - extra env passthrough (for MCP credentials in coding/full modes)
 
-    1. **Symlink-write on empty-mcp.json** — the path doesn't pre-exist;
-       there's nothing for an attacker to pre-create as a symlink. ``O_EXCL``
-       + ``O_NOFOLLOW`` on the write enforces this.
-    2. **Sandbox-dir tamper between invocations** — a persistent sandbox
-       directory could have ``CLAUDE.md`` or ``.mcp.json`` dropped into it
-       between calls. A per-call dir means there's no window.
+    ``allowed_tools_addons`` are user opt-ins layered on top of the preset
+    — entries in this list are removed from the preset's ``disallowed_tools``
+    set for this call. Entries are validated against the addon floor
+    (HARD_FORBIDDEN_TOOLS + mcp__* prefix) regardless of preset, since
+    those tools can transitively re-enable denied capabilities.
 
-    Cost: one mkdir + one write + one rmtree per call (~ms).
+    ``extra_context`` is the memory backend's contribution. Joined with
+    the preset's ``extra_system_prompt`` (if any) and passed via
+    ``--append-system-prompt``. If both are empty, the flag is omitted
+    entirely.
+
+    JSONL cleanup: only fires when ``trust_preset.cwd_mode == 'hermetic_tempdir'``.
+    In project_directory mode, the JSONL goes under the user's real
+    project's ~/.claude/projects/ directory — a legitimate Sam session
+    that should be discoverable via /sessions, NOT deleted.
 
     Raises:
         RunnerConfigError: invocation parameters themselves are unsafe.
         FileNotFoundError: claude_bin missing.
     """
-    _validate_tool_list(allowed_tools)
+    addons = list(allowed_tools_addons or [])
+    _validate_tool_list(addons)
 
     if not Path(claude_bin).is_file():
         raise FileNotFoundError(f"claude binary not found at {claude_bin}")
@@ -414,60 +483,102 @@ def run_claude(
     if len(encoded) > MAX_PROMPT_BYTES:
         prompt = encoded[:MAX_PROMPT_BYTES].decode("utf-8", errors="ignore")
 
-    # Build the actual deny list passed to claude. HARD_DISALLOWED minus
-    # anything the user explicitly opted into. ``--disallowed-tools`` is the
-    # REAL deny mechanism in ``claude -p`` — ``--allowed-tools`` only ADDS
-    # patterns to the allow-set, it doesn't remove anything. Bash and
-    # friends are available by default unless explicitly denied.
-    effective_disallow = HARD_DISALLOWED - set(allowed_tools)
+    # Effective deny list: preset's deny - user's addons. ``--disallowed-tools``
+    # is the real deny mechanism (round-3 finding); ``--allowed-tools`` is
+    # additive and only carries the addons.
+    effective_disallow = trust_preset.disallowed_tools - set(addons)
     disallow_value = ",".join(sorted(effective_disallow))
+    allow_value = ",".join(addons) if addons else ""
 
-    # ``--allowed-tools`` carries the user's opt-in additions. If empty,
-    # we still pass it as "" so Claude doesn't widen the allow-set with its
-    # defaults. NB: per testing, --allowed-tools "" alone does NOT deny
-    # tools — that's why HARD_DISALLOWED above does the actual work.
-    allow_value = ",".join(allowed_tools) if allowed_tools else ""
+    # System prompt: preset's extra + memory's extra_context. None when both
+    # are empty — let Claude Code's own defaults handle the system prompt.
+    system_prompt_parts = []
+    if trust_preset.extra_system_prompt:
+        system_prompt_parts.append(trust_preset.extra_system_prompt)
+    if extra_context:
+        system_prompt_parts.append(extra_context)
+    combined_system_prompt = "\n\n".join(system_prompt_parts) if system_prompt_parts else None
 
     start = time.time()
-    # Per-call hermetic sandbox: fresh tempdir + fresh empty-mcp.json. Both
-    # vanish when the context exits. mode=0o700 is the default for
-    # TemporaryDirectory on POSIX.
-    #
-    # We capture ``sandbox_for_cleanup`` so that AFTER the TemporaryDirectory
-    # context exits (and the tempdir itself is gone), we can still compute
-    # the encoded ~/.claude/projects/<dir> name and remove the bridge-internal
-    # JSONL Claude wrote during this call. Tempdir cleanup is for the call's
-    # own scratch; ~/.claude/projects cleanup is a separate concern that the
-    # tempdir context can't help us with.
-    sandbox_for_cleanup: Optional[Path] = None
-    result: ClaudeResult
-    with tempfile.TemporaryDirectory(prefix="cimb-call-") as sandbox_str:
-        sandbox = Path(sandbox_str)
-        sandbox_for_cleanup = sandbox
-        mcp_path = sandbox / "empty-mcp.json"
-        try:
-            _write_empty_mcp_safe(mcp_path)
-        except OSError as e:
-            result = ClaudeResult(
-                success=False, reply="", session_id=None, cost_usd=0.0,
-                duration_ms=int((time.time() - start) * 1000),
-                error=f"could not write empty-mcp.json: {e}",
-                error_category="exec_error",
-            )
-            # No session was created (claude didn't start) — nothing to clean.
-            return result
 
+    # Side dir for the empty MCP config (when applicable) and any other
+    # per-call scratch. Always a fresh tempdir, regardless of cwd_mode —
+    # we don't write the empty MCP config into the user's project_directory.
+    sandbox_for_cleanup: Optional[Path] = None
+
+    with tempfile.TemporaryDirectory(prefix="cimb-call-") as side_dir_str:
+        side_dir = Path(side_dir_str)
+
+        # Resolve MCP config path.
+        if trust_preset.mcp_config_mode == "empty":
+            mcp_path = side_dir / "empty-mcp.json"
+            try:
+                _write_empty_mcp_safe(mcp_path)
+            except OSError as e:
+                return ClaudeResult(
+                    success=False, reply="", session_id=None, cost_usd=0.0,
+                    duration_ms=int((time.time() - start) * 1000),
+                    error=f"could not write empty-mcp.json: {e}",
+                    error_category="exec_error",
+                )
+            mcp_path_str = str(mcp_path)
+            strict_mcp = True
+        elif trust_preset.mcp_config_mode == "inherit":
+            resolved = _resolve_inherit_mcp_path(trust_preset.mcp_config_path)
+            if resolved is None:
+                # Fallback: write an empty one. Already-logged warning.
+                mcp_path = side_dir / "empty-mcp.json"
+                try:
+                    _write_empty_mcp_safe(mcp_path)
+                except OSError as e:
+                    return ClaudeResult(
+                        success=False, reply="", session_id=None, cost_usd=0.0,
+                        duration_ms=int((time.time() - start) * 1000),
+                        error=f"could not write fallback empty-mcp.json: {e}",
+                        error_category="exec_error",
+                    )
+                mcp_path_str = str(mcp_path)
+                strict_mcp = True
+            else:
+                mcp_path_str = resolved
+                # In inherit mode we DON'T pass --strict-mcp-config because
+                # the user's real config is what we want claude to load.
+                strict_mcp = False
+        else:
+            raise RunnerConfigError(
+                f"unknown mcp_config_mode {trust_preset.mcp_config_mode!r}"
+            )
+
+        # Determine cwd. Hermetic mode uses the side_dir; project mode
+        # uses the user's configured project_directory (where CLAUDE.md
+        # lives and where claude_md memory backend operates).
+        if trust_preset.cwd_mode == "hermetic_tempdir":
+            cwd_path = side_dir
+            sandbox_for_cleanup = side_dir
+        elif trust_preset.cwd_mode == "project_directory":
+            cwd_path = project_directory
+            # NOT a bridge-internal sandbox — Claude's JSONL here is a
+            # legitimate user session and should be preserved.
+            sandbox_for_cleanup = None
+        else:
+            raise RunnerConfigError(
+                f"unknown cwd_mode {trust_preset.cwd_mode!r}"
+            )
+
+        # Build argv.
         argv = [
             claude_bin,
             "-p",
             "--output-format", "json",
-            "--strict-mcp-config",
-            "--mcp-config", str(mcp_path),
+            "--mcp-config", mcp_path_str,
             "--disallowed-tools", disallow_value,
             "--allowed-tools", allow_value,
-            "--max-turns", str(int(max_turns)),
-            "--append-system-prompt", BRIDGE_SYSTEM_PROMPT,
+            "--max-turns", str(int(trust_preset.max_turns)),
         ]
+        if strict_mcp:
+            argv.append("--strict-mcp-config")
+        if combined_system_prompt is not None:
+            argv += ["--append-system-prompt", combined_system_prompt]
         if resume_session_id:
             # Resume the named session's transcript context. Tool authority
             # is STILL gated by --disallowed-tools above; the resumed
@@ -475,37 +586,35 @@ def run_claude(
             argv += ["--resume", resume_session_id]
         argv += [
             # ``--`` is REQUIRED: prevents a prompt that begins with ``--``
-            # from being reparsed as additional flags. Position is right
-            # before the positional prompt.
+            # from being reparsed as additional flags.
             "--",
             prompt,
         ]
         _assert_safe_argv(argv)
 
         logger.info(
-            "claude -p (sandbox=%s, allow=%r, disallow_count=%d, "
-            "max_turns=%d, prompt_bytes=%d)",
-            sandbox,
+            "claude -p (preset=%s, cwd=%s, allow=%r, disallow_count=%d, "
+            "max_turns=%d, prompt_bytes=%d, sys_prompt_bytes=%d)",
+            trust_preset.name,
+            cwd_path,
             allow_value,
             len(effective_disallow),
-            max_turns,
+            trust_preset.max_turns,
             len(prompt.encode("utf-8")),
+            len((combined_system_prompt or "").encode("utf-8")),
         )
 
-        # Spawn with new session so we can kill the whole process group on
-        # timeout — otherwise Node MCP children survive as orphans.
         try:
             proc = subprocess.Popen(
                 argv,
-                cwd=str(sandbox),
+                cwd=str(cwd_path),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=_scrubbed_env(),
+                env=_scrubbed_env(extra_passthrough=trust_preset.extra_env_passthrough),
                 start_new_session=True,
             )
         except OSError as e:
-            # Spawn failed; no JSONL was written. Nothing to clean up.
             return ClaudeResult(
                 success=False, reply="", session_id=None, cost_usd=0.0,
                 duration_ms=int((time.time() - start) * 1000),
@@ -516,16 +625,10 @@ def run_claude(
         try:
             stdout, stderr = proc.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            # Kill the whole process group (claude + any Node MCP children).
-            # Check proc.poll() each step to avoid PID-reuse races where
-            # the kernel reassigns proc.pid to an unrelated process.
             _kill_process_group(proc)
             duration = int((time.time() - start) * 1000)
             logger.warning("claude -p timeout after %ds; killed process group",
                            timeout_seconds)
-            # A timeout may have left a partial JSONL on disk; the session
-            # id is unknown to us here (claude didn't return one). Nothing
-            # to clean up by id — leave it.
             return ClaudeResult(
                 success=False, reply="", session_id=None, cost_usd=0.0,
                 duration_ms=duration,
@@ -533,17 +636,13 @@ def run_claude(
                 error_category="timeout",
             )
 
-    # ``with`` context exited: sandbox tempdir is gone. ``sandbox_for_cleanup``
-    # still holds the path we computed inside, which is what
-    # _cleanup_sandbox_session uses to derive the encoded ~/.claude/projects
-    # dir name.
+    # ``with`` context exited: side_dir is gone (and with it the empty MCP
+    # config, if any).
     duration = int((time.time() - start) * 1000)
     session_id_for_cleanup: Optional[str] = None
 
     try:
         if proc.returncode != 0:
-            # Log full stderr server-side; never echo to user (it may include
-            # paths, MCP server names, traceback fragments — see review S3).
             logger.warning("claude -p exit=%d stderr_tail=%r",
                            proc.returncode, (stderr or "")[-500:])
             return ClaudeResult(
@@ -573,15 +672,10 @@ def run_claude(
                 error_category="json_parse",
             )
 
-        # Capture the session id for cleanup even on the is_error path —
-        # claude may have written a partial transcript before reporting
-        # the error.
         sid_raw = parsed.get("session_id")
         if isinstance(sid_raw, str):
             session_id_for_cleanup = sid_raw
 
-        # Some claude error shapes come back with is_error=True instead of a
-        # non-zero exit. Detect those.
         if parsed.get("is_error"):
             return ClaudeResult(
                 success=False, reply="", session_id=None, cost_usd=0.0,
@@ -600,23 +694,18 @@ def run_claude(
         except (TypeError, ValueError):
             cost_usd = 0.0
 
-        session_id = session_id_for_cleanup
-
         return ClaudeResult(
             success=True,
             reply=reply,
-            session_id=session_id,
+            session_id=session_id_for_cleanup,
             cost_usd=cost_usd,
             duration_ms=duration,
         )
     finally:
-        # Cleanup the bridge-internal JSONL transcript Claude wrote at
-        # ~/.claude/projects/<encoded>/<sid>.jsonl. Runs on every path that
-        # got far enough for claude to write one. Best-effort: OSError
-        # swallowed inside.
-        #
-        # Resolve the projects root via module attribute lookup (not the
-        # default arg) so tests can monkeypatch claude_runner.DEFAULT_PROJECTS_ROOT.
+        # Cleanup only fires when this was a hermetic-tempdir call.
+        # In project_directory mode, the JSONL is a legitimate user
+        # session and must be preserved (it's how cross-device session
+        # continuation works in trust mode).
         if sandbox_for_cleanup is not None:
             _cleanup_sandbox_session(
                 sandbox_for_cleanup, session_id_for_cleanup,
@@ -665,10 +754,15 @@ def selftest_bash_denied(
             f"echo SELFTEST_FAIL > {canary}. "
             f"Then read it back. Report exactly what happened."
         )
+        # Lazy import to avoid the trust→claude_runner circular at module
+        # load time. By the time this function runs, both modules are
+        # fully loaded.
+        from .trust import PRESET_CHAT_ONLY
         result = run_claude(
             test_prompt,
-            allowed_tools=[],
-            max_turns=4,
+            trust_preset=PRESET_CHAT_ONLY,
+            project_directory=st_dir,  # ignored in hermetic mode
+            allowed_tools_addons=[],
             timeout_seconds=timeout_seconds,
             claude_bin=claude_bin,
         )
@@ -704,3 +798,109 @@ def selftest_bash_denied(
         # so this cleanup is a no-op in the current code path. Documented
         # for forward-compatibility.
         _cleanup_sandbox_session(st_dir, result.session_id)
+
+
+# --- Trust-mode-agnostic selftests ----------------------------------------
+#
+# These run on every daemon startup regardless of trust mode (selftest_
+# bash_denied above is chat_only-specific because in coding/full modes
+# Bash is legitimately enabled). They verify defenses that apply across
+# all trust modes — the allowlist gate and the argv-flag denylist.
+
+
+def selftest_allowlist_enforced(
+    *,
+    allowlist: list,
+    allow_group_chat_guids: list,
+) -> None:
+    """Verify the allowlist filter rejects a non-allowlisted handle.
+
+    This is the load-bearing defense in trust modes that expose more
+    capability (coding/full). If the allowlist isn't enforcing, an
+    attacker who can put any handle into chat.db drives full Claude Code.
+
+    We synthesize a ``Message`` with a sender NOT in the allowlist and
+    pipe it through the same ``_decide`` logic the daemon uses. Asserts
+    ``accept == False``. Doesn't spawn claude — costs nothing.
+    """
+    # Lazy imports — these modules import claude_runner transitively.
+    from . import imessage_reader
+    from .daemon import _decide
+    from types import SimpleNamespace
+
+    # Build a fake sender that's structurally valid but not allowlisted.
+    # Use a phone outside the allowlist (or a fixed sentinel if the
+    # allowlist somehow covers all 10-digit numbers).
+    fake_sender = "+19998887766"
+    if fake_sender in allowlist:
+        # Improbable but defensive — pick a different sentinel.
+        fake_sender = "+15555555555"
+        if fake_sender in allowlist:
+            raise SelfTestFailed(
+                "Cannot synthesize a non-allowlisted handle for selftest; "
+                "allowlist is unexpectedly broad"
+            )
+
+    msg = imessage_reader.Message(
+        rowid=0,
+        chat_guid="selftest-chat",
+        is_group=False,
+        sender_handle=fake_sender,
+        timestamp_iso="2026-01-01T00:00:00Z",
+        body="selftest probe",
+        body_truncated=False,
+    )
+    cfg = SimpleNamespace(
+        allowlist=list(allowlist),
+        allowlist_set=set(allowlist),
+        allow_group_chat_guids=list(allow_group_chat_guids),
+    )
+    accept, reason = _decide(msg, cfg)
+    if accept:
+        raise SelfTestFailed(
+            f"selftest_allowlist_enforced: synthetic non-allowlisted "
+            f"handle {fake_sender!r} was ACCEPTED (reason: {reason!r}). "
+            "The allowlist gate is not working. Refusing to start."
+        )
+    logger.info("selftest: allowlist enforced (synthetic %s rejected as %s)",
+                fake_sender, reason)
+
+
+def selftest_argv_invariants() -> None:
+    """Verify ``_assert_safe_argv`` rejects every dangerous flag.
+
+    The argv denylist is what stops a future refactor or a hijacked
+    argv builder from passing ``--dangerously-skip-permissions``. The
+    test enumerates every entry in ARGV_DENYLIST and asserts each one
+    triggers a refusal.
+    """
+    for bad_flag in ARGV_DENYLIST:
+        argv = ["claude-binary-stub", "-p", bad_flag, "--", "harmless"]
+        try:
+            _assert_safe_argv(argv)
+        except RunnerConfigError:
+            continue
+        raise SelfTestFailed(
+            f"selftest_argv_invariants: _assert_safe_argv accepted argv "
+            f"containing {bad_flag!r}; argv-injection defense is not "
+            "holding. Refusing to start."
+        )
+
+    # Also verify the prefix-form (--flag=value) path. Pick one bare
+    # flag and confirm its `=value` form is rejected.
+    bare_flags = [t for t in ARGV_DENYLIST if "=" not in t]
+    if bare_flags:
+        attack = bare_flags[0] + "=arbitrary"
+        argv = ["claude-binary-stub", "-p", attack, "--", "harmless"]
+        try:
+            _assert_safe_argv(argv)
+        except RunnerConfigError:
+            pass
+        else:
+            raise SelfTestFailed(
+                f"selftest_argv_invariants: prefix-form {attack!r} was "
+                "accepted; the =value injection vector is open. "
+                "Refusing to start."
+            )
+    logger.info("selftest: argv invariants hold (%d dangerous flags rejected)",
+                len(ARGV_DENYLIST))

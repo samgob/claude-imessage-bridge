@@ -38,6 +38,7 @@ from . import health
 from . import imessage_reader
 from . import imessage_sender
 from . import state
+from . import trust as trust_mod
 
 logger = logging.getLogger("imessage_bridge")
 
@@ -407,11 +408,20 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     # transcript context loads, but tool authority is still gated by
     # --disallowed-tools (resume doesn't grant new tool authority).
     resume_id = state.get_current_session(norm)
+    # Trust mode resolution. For now, no per-alias override (alias state
+    # isn't tracked per-handle yet — that lands in chunk 4 with schema v3).
+    # Default-only resolution gives the right preset for the common case.
+    active_preset = trust_mod.resolve_trust(
+        trust_default=cfg.trust_default,
+        trust_per_alias=cfg.trust_per_alias,
+        active_alias=None,
+    )
     try:
         result = claude_runner.run_claude(
             msg.body,
-            allowed_tools=cfg.allowed_tools,
-            max_turns=cfg.per_call_max_turns,
+            trust_preset=active_preset,
+            project_directory=cfg.project_directory,
+            allowed_tools_addons=cfg.allowed_tools,
             timeout_seconds=cfg.per_call_timeout_seconds,
             claude_bin=cfg.claude_binary,
             resume_session_id=resume_id,
@@ -669,21 +679,40 @@ def main(argv: list[str] | None = None) -> int:
             "DO NOT USE IN PRODUCTION"
         )
     else:
-        logger.info("running selftest: verifying Bash denial under current config…")
+        # Trust-mode-agnostic selftests run in EVERY mode. They verify the
+        # defenses that survive into coding/full modes (allowlist gate +
+        # argv-injection refusal). Costs nothing — no claude calls.
+        logger.info("running selftest: allowlist + argv invariants…")
         try:
-            claude_runner.selftest_bash_denied(
-                claude_bin=cfg.claude_binary,
-                timeout_seconds=min(cfg.per_call_timeout_seconds, 60),
+            claude_runner.selftest_allowlist_enforced(
+                allowlist=cfg.allowlist,
+                allow_group_chat_guids=cfg.allow_group_chat_guids,
             )
+            claude_runner.selftest_argv_invariants()
         except claude_runner.SelfTestFailed as e:
             logger.error("SECURITY SELF-TEST FAILED: %s", e)
             return 4
-        except FileNotFoundError as e:
-            logger.error("selftest setup error (claude binary?): %s", e)
-            return 4
-        except Exception as e:
-            logger.exception("selftest crashed: %s", e)
-            return 4
+
+        # Bash-denial selftest is chat_only-specific. In coding/full
+        # modes Bash is legitimately enabled and the test would
+        # (correctly) detect Bash executing, which is no longer a
+        # failure. Skip it.
+        if cfg.trust_default == "chat_only":
+            logger.info("running selftest: verifying Bash denial under chat_only…")
+            try:
+                claude_runner.selftest_bash_denied(
+                    claude_bin=cfg.claude_binary,
+                    timeout_seconds=min(cfg.per_call_timeout_seconds, 60),
+                )
+            except claude_runner.SelfTestFailed as e:
+                logger.error("SECURITY SELF-TEST FAILED: %s", e)
+                return 4
+            except FileNotFoundError as e:
+                logger.error("selftest setup error (claude binary?): %s", e)
+                return 4
+            except Exception as e:
+                logger.exception("selftest crashed: %s", e)
+                return 4
 
     logger.info(
         "starting bridge: project_dir=%s allowlist=%d entries debug=%s",

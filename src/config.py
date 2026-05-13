@@ -443,7 +443,8 @@ def _parse_memory(raw: dict) -> tuple[str, Dict[str, object], Dict[str, object]]
         "exclude": list(claude_md_block.get("exclude", [])),
     }
     max_bytes_val = claude_md_params["max_bytes"]
-    assert isinstance(max_bytes_val, int)  # mypy narrowing; set above
+    if not isinstance(max_bytes_val, int):  # defensive; set above
+        raise ValueError("memory.claude_md.max_bytes must be an integer")
     if max_bytes_val < 1024 or max_bytes_val > 256 * 1024:
         raise ValueError(
             "memory.claude_md.max_bytes must be in [1024, 262144]"
