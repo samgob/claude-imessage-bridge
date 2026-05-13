@@ -50,16 +50,46 @@ _BRIDGE_INTERNAL_CWD_MARKERS: Final = (
     "cimb-call-",      # hermetic per-call sandbox for normal replies
 )
 
+# Snippet-text signature of the selftest prompt. Belt-and-suspenders for
+# sessions whose JSONL has no early ``cwd`` record (older Claude Code
+# releases sometimes didn't write one) AND whose parent dir is somehow
+# also not informative — e.g., a session from a daemon run where
+# tempfile.TemporaryDirectory landed somewhere unexpected. The string
+# ``SELFTEST_FAIL`` is unique enough that user content with it is
+# improbable; a false positive just hides the session from /sessions,
+# which is fine.
+_SELFTEST_SNIPPET_SIGNATURE: Final = "SELFTEST_FAIL"
 
-def _is_bridge_internal(cwd: Optional[Path]) -> bool:
-    """True if the session was created inside one of the bridge's own
-    per-call tempdirs (selftest or hermetic reply). These should NOT
-    show up in /sessions by default — they're bridge plumbing, not
-    user-meaningful conversations."""
-    if cwd is None:
-        return False
-    s = str(cwd)
-    return any(marker in s for marker in _BRIDGE_INTERNAL_CWD_MARKERS)
+
+def _is_bridge_internal(
+    cwd: Optional[Path],
+    *,
+    file_path: Optional[Path] = None,
+    snippet: str = "",
+) -> bool:
+    """True if the session was created by the bridge itself (selftest or
+    hermetic per-call sandbox). These should NOT show up in /sessions by
+    default — they're plumbing, not user-meaningful conversations.
+
+    Checks three signals in order:
+      1. ``cwd`` from the JSONL ``cwd`` field (if present in early records).
+      2. The parent directory name under ``~/.claude/projects/`` — this
+         is set at session creation, doesn't depend on JSONL content,
+         and is the most robust signal.
+      3. The first user-message snippet contains ``SELFTEST_FAIL`` — the
+         unique signature of our startup selftest prompt.
+    """
+    if cwd is not None:
+        cwd_str = str(cwd)
+        if any(m in cwd_str for m in _BRIDGE_INTERNAL_CWD_MARKERS):
+            return True
+    if file_path is not None:
+        parent_name = file_path.parent.name
+        if any(m in parent_name for m in _BRIDGE_INTERNAL_CWD_MARKERS):
+            return True
+    if snippet and _SELFTEST_SNIPPET_SIGNATURE in snippet:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -182,7 +212,9 @@ def discover_sessions(
             continue
         cwd, snippet = _extract_session_metadata(path)
         is_routine = snippet.startswith(_ROUTINE_PREFIX)
-        is_internal = _is_bridge_internal(cwd)
+        is_internal = _is_bridge_internal(
+            cwd, file_path=path, snippet=snippet,
+        )
         if not include_routines and is_routine:
             continue
         if not include_bridge_internal and is_internal:
@@ -308,6 +340,8 @@ def find_by_id(
                 file_path=candidate,
                 size_bytes=stat.st_size,
                 is_routine=snippet.startswith(_ROUTINE_PREFIX),
-                is_bridge_internal=_is_bridge_internal(cwd),
+                is_bridge_internal=_is_bridge_internal(
+                    cwd, file_path=candidate, snippet=snippet,
+                ),
             )
     return None

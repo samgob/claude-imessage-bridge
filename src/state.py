@@ -435,7 +435,7 @@ def audit(
 
 # --- Rate limiting --------------------------------------------------------
 
-def _bucket(ts: float = None) -> str:
+def _bucket(ts: Optional[float] = None) -> str:
     """Minute-bucket key. Same minute -> same key."""
     ts = ts if ts is not None else time.time()
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d%H%M")

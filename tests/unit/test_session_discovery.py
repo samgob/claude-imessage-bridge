@@ -13,7 +13,6 @@ import os
 import time
 from pathlib import Path
 
-import pytest
 
 from src import session_discovery
 

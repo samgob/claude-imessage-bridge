@@ -8,7 +8,6 @@ guarantees evaporate. These tests verify the refuse-to-start preconditions.
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
 
 import pytest

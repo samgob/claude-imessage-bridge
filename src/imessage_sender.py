@@ -43,8 +43,31 @@ MAX_REPLY_BYTES: Final = 8000
 # Characters that change visual rendering vs. raw text. Stripped from
 # outgoing bodies so what the recipient sees matches what we logged and
 # what Claude generated.
-_BIDI_CHARS: Final = "‪‫‬‭‮⁦⁧⁨⁩"
-_ZERO_WIDTH_CHARS: Final = "​‌‍⁠﻿"
+#
+# Written as ``\u`` escapes (NOT literal BiDi/zero-width chars in the
+# source) so:
+#   1. the file itself doesn't trip bandit's B613 "trojansource"
+#      detector — same characters at runtime, safer source;
+#   2. a code reviewer scanning the file in a non-BiDi-aware editor
+#      sees the codepoints explicitly.
+_BIDI_CHARS: Final = "".join(chr(c) for c in (
+    0x202A,  # LRE   LEFT-TO-RIGHT EMBEDDING
+    0x202B,  # RLE   RIGHT-TO-LEFT EMBEDDING
+    0x202C,  # PDF   POP DIRECTIONAL FORMATTING
+    0x202D,  # LRO   LEFT-TO-RIGHT OVERRIDE
+    0x202E,  # RLO   RIGHT-TO-LEFT OVERRIDE
+    0x2066,  # LRI   LEFT-TO-RIGHT ISOLATE
+    0x2067,  # RLI   RIGHT-TO-LEFT ISOLATE
+    0x2068,  # FSI   FIRST STRONG ISOLATE
+    0x2069,  # PDI   POP DIRECTIONAL ISOLATE
+))
+_ZERO_WIDTH_CHARS: Final = "".join(chr(c) for c in (
+    0x200B,  # ZWSP  ZERO WIDTH SPACE
+    0x200C,  # ZWNJ  ZERO WIDTH NON-JOINER
+    0x200D,  # ZWJ   ZERO WIDTH JOINER
+    0x2060,  # WJ    WORD JOINER
+    0xFEFF,  # BOM / ZERO WIDTH NO-BREAK SPACE
+))
 _DISPLAY_ATTACK_TABLE: Final = str.maketrans(
     "", "", _BIDI_CHARS + _ZERO_WIDTH_CHARS
 )

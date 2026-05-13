@@ -16,7 +16,6 @@ import plistlib
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from src import imessage_reader
 

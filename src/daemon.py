@@ -46,7 +46,7 @@ CURSOR_NAME = "chatdb_last_rowid"
 HEARTBEAT_INTERVAL_SECONDS = 300
 
 _running = True
-_metrics = Counter()
+_metrics: Counter = Counter()
 
 
 # --- Self-chat echo prevention ------------------------------------------

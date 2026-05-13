@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 

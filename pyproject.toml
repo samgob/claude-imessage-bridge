@@ -20,6 +20,16 @@ packages = ["src"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]
+# B404: importing subprocess is a "consider security implications" warning.
+#       We deliberately use subprocess for claude -p and osascript with
+#       fully-controlled argv lists; the security implications are the
+#       whole subject of docs/THREAT_MODEL.md.
+# B603: subprocess call without shell=True. That's exactly what we want —
+#       the safe pattern. Bandit flags it because the argv came from a
+#       function arg, but every call site validates the argv first
+#       (_assert_safe_argv in claude_runner; strict handle regex in
+#       imessage_sender) and never invokes a shell.
+skips = ["B404", "B603"]
 
 [tool.ruff]
 line-length = 100

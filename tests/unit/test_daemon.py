@@ -10,10 +10,8 @@ the small surface that's cleanly separable:
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 from src import daemon, imessage_reader
 

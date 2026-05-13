@@ -24,7 +24,6 @@ the threat model as a future concern.
 from __future__ import annotations
 
 import logging
-import os
 import plistlib
 import sqlite3
 from dataclasses import dataclass

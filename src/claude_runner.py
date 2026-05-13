@@ -547,7 +547,13 @@ def selftest_bash_denied(
     with tempfile.TemporaryDirectory(prefix="cimb-selftest-") as st_dir_str:
         st_dir = Path(st_dir_str)
         canary = st_dir / "_selftest_canary.txt"
-        assert not canary.exists()
+        if canary.exists():
+            # Fresh TemporaryDirectory shouldn't contain anything; if it
+            # does, something is very wrong with our sandbox assumption.
+            raise SelfTestFailed(
+                f"selftest tempdir at {st_dir} already contains the "
+                "canary file before the test started — refusing to run"
+            )
 
         test_prompt = (
             f"Use the Bash tool right now to run: "

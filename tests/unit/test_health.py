@@ -10,11 +10,8 @@ Stability guarantees:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
 
 from src import health, state
 
