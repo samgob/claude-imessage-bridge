@@ -22,12 +22,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_STATE_DIR = Path.home() / ".claude-imessage-bridge"
 
 
-# Schema version. Bump when a migration is added, and append a step to
-# ``_MIGRATIONS`` that knows how to bring v=current → v=current+1. The
-# bridge refuses to start if the on-disk DB has a HIGHER version than this
-# code understands (forward incompatibility — operator probably downgraded
-# without thinking).
-SCHEMA_VERSION: int = 1
+# Schema version. Bump when a migration is added, and register a
+# ``_ensure_*_columns`` step in ``_apply_schema``. The bridge refuses to
+# start if the on-disk DB has a HIGHER version than this code understands
+# (forward incompatibility — operator probably downgraded without thinking).
+#
+# History:
+#   v0 — pre-Phase-D state.db (no user_version stamp).
+#   v1 — Phase D: added chatdb_rowid, cost_cents, error_category to
+#        audit_log + idx_audit_chatdb_rowid index.
+#   v2 — Live-test fix: retroactively add last_options_json + last_options_at
+#        to conversations. Phase C introduced those columns but the
+#        original migration was CREATE TABLE IF NOT EXISTS, a no-op for
+#        any state.db that already existed from Phase A/B. Observed live
+#        on a state.db that had survived the A→C transition.
+SCHEMA_VERSION: int = 2
 
 
 # v0 schema (what the project shipped pre-Phase-D). New installs leapfrog
@@ -75,44 +84,77 @@ CREATE INDEX IF NOT EXISTS idx_reply_counter_bucket ON reply_counter(bucket);
 """
 
 
-# Migration 0 → 1: add structured columns to audit_log so the cookbook
-# queries don't have to regex the ``detail`` column.
-#   chatdb_rowid    — the message.ROWID the row was triggered by; lets you
-#                     correlate audit rows back to chat.db.
-#   cost_cents      — claude spend attributed to this row (in cents). 0
-#                     for non-claude rows (commands, drops).
-#   error_category  — one of "timeout"/"exec_error"/"json_parse"/
-#                     "claude_error"/None; matches claude_runner's
-#                     ClaudeResult.error_category.
-_MIGRATION_V0_TO_V1 = """
-ALTER TABLE audit_log ADD COLUMN chatdb_rowid INTEGER;
-ALTER TABLE audit_log ADD COLUMN cost_cents INTEGER;
-ALTER TABLE audit_log ADD COLUMN error_category TEXT;
-CREATE INDEX IF NOT EXISTS idx_audit_chatdb_rowid ON audit_log(chatdb_rowid);
-"""
-
-
 class SchemaTooNew(RuntimeError):
     """state.db has a higher user_version than this code understands."""
 
 
 class SchemaMigrationMissing(RuntimeError):
     """state.db is on a lower version than this code, and no registered
-    migration knows how to bring it forward.
+    migration step knows how to advance it.
 
-    Refusing to start is the right default: silently stamping forward would
-    mean a future v2 of the bridge run against a v1 DB without a v1→v2
-    migration registered would proceed with v2 code against v1 data — the
-    kind of code-vs-doc drift that hides real bugs.
+    Refusing to start is the right default: silently stamping forward
+    would let newer code run against older data and hide real bugs.
     """
+
+
+def _ensure_audit_log_v1_columns(conn: sqlite3.Connection) -> None:
+    """v0 → v1. Add structured columns to ``audit_log``:
+
+      chatdb_rowid    — the message.ROWID the row was triggered by.
+      cost_cents      — claude spend on this row, integer cents.
+      error_category  — one of timeout/exec_error/json_parse/claude_error/NULL.
+
+    Idempotent: only ALTERs columns that don't already exist (covers the
+    partial-migration crash path).
+    """
+    existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")
+    }
+    if "chatdb_rowid" not in existing:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN chatdb_rowid INTEGER")
+    if "cost_cents" not in existing:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN cost_cents INTEGER")
+    if "error_category" not in existing:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN error_category TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS "
+        "idx_audit_chatdb_rowid ON audit_log(chatdb_rowid)"
+    )
+
+
+def _ensure_conversations_v2_columns(conn: sqlite3.Connection) -> None:
+    """v1 → v2. Retroactively add ``last_options_json`` and
+    ``last_options_at`` to ``conversations``.
+
+    Phase C added these columns to the schema, but the original migration
+    relied on ``CREATE TABLE IF NOT EXISTS`` — which is a no-op when the
+    table already exists from Phase A/B. A state.db that survived the
+    A→C transition without ever being reset ends up missing the columns,
+    and ``/sessions`` / ``/use`` crash with ``no such column:
+    last_options_at`` when they try to stash the numbered options.
+
+    Idempotent: only ALTERs columns that don't already exist.
+    """
+    existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(conversations)")
+    }
+    if "last_options_json" not in existing:
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN last_options_json TEXT"
+        )
+    if "last_options_at" not in existing:
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN last_options_at TEXT"
+        )
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
     """Apply schema migrations forward to ``SCHEMA_VERSION``.
 
     Uses SQLite's ``PRAGMA user_version`` as the migration ledger so we
-    don't need a separate migrations table. Each step is wrapped in its
-    own transaction.
+    don't need a separate migrations table. The whole forward chain runs
+    in a single transaction so a crash mid-migration doesn't leave the
+    DB in an intermediate state.
     """
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current > SCHEMA_VERSION:
@@ -121,52 +163,37 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
             f"how to handle up to {SCHEMA_VERSION}. Did you downgrade? "
             "Remove the DB to reset, or upgrade the daemon."
         )
-    if current == 0:
-        # Fresh install OR pre-Phase-D DB. Apply v0 base + v1 migration.
-        with conn:
-            conn.executescript(_SCHEMA_V0)
-            # Check whether ALTER columns already exist (covers the case of
-            # a fresh DB where _SCHEMA_V0 already includes them in the
-            # future, vs. a v0 DB that needs the ALTER). For now v0 schema
-            # doesn't include the new columns, so this is the migration path.
-            existing_cols = {
-                row["name"]
-                for row in conn.execute("PRAGMA table_info(audit_log)")
-            }
-            stmts = []
-            if "chatdb_rowid" not in existing_cols:
-                stmts.append(
-                    "ALTER TABLE audit_log ADD COLUMN chatdb_rowid INTEGER"
-                )
-            if "cost_cents" not in existing_cols:
-                stmts.append(
-                    "ALTER TABLE audit_log ADD COLUMN cost_cents INTEGER"
-                )
-            if "error_category" not in existing_cols:
-                stmts.append(
-                    "ALTER TABLE audit_log ADD COLUMN error_category TEXT"
-                )
-            for stmt in stmts:
-                conn.execute(stmt)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS "
-                "idx_audit_chatdb_rowid ON audit_log(chatdb_rowid)"
-            )
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    if current == SCHEMA_VERSION:
         return
-    # If we add more versions, chain the migrations here.
-    # Example: if current < 2: apply v1→v2 …
-    if current < SCHEMA_VERSION:
-        # No registered migration knows how to bring us forward. Refuse
-        # rather than silently stamp — silent stamping would let v2 code
-        # run against v1 data and hide real bugs. Round-4 solver finding.
-        raise SchemaMigrationMissing(
-            f"state.db user_version={current}, but this code is "
-            f"SCHEMA_VERSION={SCHEMA_VERSION} and no v{current}→"
-            f"v{current+1} migration is registered. Either pull a "
-            "newer build that has the migration, or reset state.db "
-            "deliberately (see docs/RECOVERY.md)."
-        )
+
+    with conn:
+        # Always run the base ``CREATE TABLE IF NOT EXISTS`` script — it's
+        # a no-op for existing tables and creates anything that's missing.
+        conn.executescript(_SCHEMA_V0)
+
+        # Forward-chain registered migrations. ``current`` is incremented
+        # as each step lands so the chain naturally fires only the
+        # remaining steps.
+        if current < 1:
+            _ensure_audit_log_v1_columns(conn)
+            current = 1
+        if current < 2:
+            _ensure_conversations_v2_columns(conn)
+            current = 2
+
+        # Any gap between the last registered step and SCHEMA_VERSION
+        # means a maintainer bumped the version without adding a step.
+        # Refuse rather than silently stamp.
+        if current != SCHEMA_VERSION:
+            raise SchemaMigrationMissing(
+                f"state.db user_version stalled at {current} while "
+                f"SCHEMA_VERSION={SCHEMA_VERSION}. A migration step for "
+                f"v{current}→v{current+1} is not registered in "
+                "_apply_schema. Either add the step, pull a newer build, "
+                "or reset state.db deliberately (see docs/RECOVERY.md)."
+            )
+
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def _secure_open_db(path: Path) -> sqlite3.Connection:

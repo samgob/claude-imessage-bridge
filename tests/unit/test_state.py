@@ -386,13 +386,123 @@ def test_schema_partial_migration_recovers(state_dir: Path):
 
 def test_schema_migration_missing_raises(state_dir: Path, monkeypatch):
     """Bump SCHEMA_VERSION above what _apply_schema knows; an existing
-    v1 DB should hit the no-registered-migration path and raise
-    SchemaMigrationMissing (rather than silently stamping forward)."""
-    state.init_state_dir(state_dir)  # stamps to v1
-    # Pretend the code is now v2 with no v1→v2 migration registered.
+    fully-migrated DB should hit the no-registered-migration path and
+    raise SchemaMigrationMissing (rather than silently stamping forward)."""
+    state.init_state_dir(state_dir)  # stamps to SCHEMA_VERSION
+    # Pretend the code is now SCHEMA_VERSION+1 with no migration registered.
     monkeypatch.setattr(state, "SCHEMA_VERSION", state.SCHEMA_VERSION + 1)
     with pytest.raises(state.SchemaMigrationMissing):
         state.init_state_dir(state_dir)
+
+
+def test_schema_v1_to_v2_adds_conversations_columns(state_dir: Path):
+    """A state.db at user_version=1 whose ``conversations`` table is
+    missing ``last_options_json`` / ``last_options_at`` (the Phase C
+    columns that were never migrated for pre-Phase-C DBs) must have
+    them added on next init. Observed live on Sam's laptop.
+    """
+    import sqlite3
+
+    db_path = state_dir / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript("""
+            CREATE TABLE cursor (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            -- The pre-Phase-C conversations table: missing the options cols.
+            CREATE TABLE conversations (
+                handle TEXT PRIMARY KEY,
+                current_session_id TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE audit_log (
+                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                handle_redacted TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                detail TEXT,
+                reply_bytes INTEGER,
+                chatdb_rowid INTEGER,
+                cost_cents INTEGER,
+                error_category TEXT
+            );
+            CREATE TABLE reply_counter (
+                bucket TEXT NOT NULL, handle TEXT NOT NULL,
+                n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (bucket, handle)
+            );
+            CREATE TABLE daily_cost (
+                date_utc TEXT PRIMARY KEY, cents INTEGER NOT NULL DEFAULT 0
+            );
+            PRAGMA user_version = 1;
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Run init — should advance to SCHEMA_VERSION (>= 2) and add cols.
+    state.init_state_dir(state_dir)
+    with state.connection(state_dir) as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert "last_options_json" in cols
+    assert "last_options_at" in cols
+    assert version == state.SCHEMA_VERSION
+
+    # And the post-migration set_last_options call must succeed (this is
+    # the live failure mode — INSERT with last_options_at column).
+    state.set_last_options(
+        "+15551234567", [{"id": "x", "snippet": "y"}], state_dir=state_dir,
+    )
+    assert state.get_last_options("+15551234567", state_dir=state_dir) == [
+        {"id": "x", "snippet": "y"}
+    ]
+
+
+def test_schema_v0_full_chain_to_current(state_dir: Path):
+    """A v0 DB (no user_version stamp) must run the full forward chain —
+    both audit_log v1 and conversations v2 columns end up present."""
+    import sqlite3
+
+    db_path = state_dir / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript("""
+            CREATE TABLE cursor (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            CREATE TABLE conversations (
+                handle TEXT PRIMARY KEY,
+                current_session_id TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE audit_log (
+                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                handle_redacted TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                detail TEXT,
+                reply_bytes INTEGER
+            );
+            CREATE TABLE reply_counter (
+                bucket TEXT NOT NULL, handle TEXT NOT NULL,
+                n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (bucket, handle)
+            );
+            CREATE TABLE daily_cost (
+                date_utc TEXT PRIMARY KEY, cents INTEGER NOT NULL DEFAULT 0
+            );
+            PRAGMA user_version = 0;
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+    state.init_state_dir(state_dir)
+    with state.connection(state_dir) as conn:
+        audit_cols = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+        conv_cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert {"chatdb_rowid", "cost_cents", "error_category"} <= audit_cols
+    assert {"last_options_json", "last_options_at"} <= conv_cols
+    assert version == state.SCHEMA_VERSION
 
 
 def test_schema_migration_from_v0_adds_columns(state_dir: Path):
