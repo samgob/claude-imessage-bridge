@@ -10,6 +10,7 @@ the small surface that's cleanly separable:
 
 from __future__ import annotations
 
+import argparse
 from types import SimpleNamespace
 
 
@@ -211,3 +212,72 @@ def test_audit_failure_detail_string_redacted():
     assert "raw=%r" in source, (
         "expected the raw error to be logged server-side via logger.warning"
     )
+
+
+# --- --skip-selftest dev flag ------------------------------------------
+
+def _parser_for_skip_selftest_test():
+    """Reconstruct the daemon's argparse for the parsing-only tests."""
+    parser = argparse.ArgumentParser(prog="imessage-bridge")
+    parser.add_argument("--config")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--reset-cursor", action="store_true")
+    parser.add_argument("--skip-selftest", action="store_true")
+    return parser
+
+
+def test_skip_selftest_accepted_interactive(monkeypatch, tmp_path, fake_claude_binary):
+    """When stdin is a tty, --skip-selftest is parsed cleanly. We don't
+    boot the full daemon (network, signals, etc.) — we just verify the
+    flag landed in args and is honored by the same conditional branch."""
+    args = _parser_for_skip_selftest_test().parse_args(["--skip-selftest"])
+    assert args.skip_selftest is True
+
+    # Confirm the daemon's source carries the tty guard for the flag. The
+    # behavior is tested via the not-a-tty case below; this guards against
+    # a future refactor that removes the guard entirely.
+    import inspect
+    source = inspect.getsource(daemon.main)
+    assert "skip_selftest" in source
+    assert "isatty" in source
+    assert "SELFTEST SKIPPED" in source
+
+
+def test_skip_selftest_refused_when_not_tty(monkeypatch, tmp_path, fake_claude_binary):
+    """Refuse --skip-selftest when stdin is not a tty — protects against
+    accidental embedding in a launchd plist / systemd unit / cron job."""
+    # Write a minimal valid config so load() succeeds.
+    import yaml
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "project_directory": str(project),
+        "allowlist": ["+15551234567"],
+        "allow_group_chat_guids": [],
+        "allowed_tools": [],
+        "forbidden_tools": [],
+        "poll_interval_seconds": 3.0,
+        "reply_rate_limit_per_minute": 10,
+        "daily_cost_cap_usd": 5.0,
+        "per_call_cost_cap_usd": 0.50,
+        "per_call_max_turns": 1,
+        "per_call_timeout_seconds": 90,
+        "circuit_breaker_failures": 5,
+        "claude_binary": str(fake_claude_binary),
+        "debug": False,
+    }))
+
+    # Point state.DEFAULT_STATE_DIR at a tmp dir so init_state_dir doesn't
+    # touch the real ~/.claude-imessage-bridge/.
+    monkeypatch.setattr(daemon.state, "DEFAULT_STATE_DIR", tmp_path / "state")
+
+    # Stub preflight (it touches osascript path) so we reach the
+    # skip-selftest branch.
+    monkeypatch.setattr(daemon, "_preflight", lambda _sd: None)
+
+    # Force stdin.isatty() False to simulate launchd/systemd.
+    monkeypatch.setattr(daemon.sys.stdin, "isatty", lambda: False)
+
+    rc = daemon.main(["--config", str(cfg_path), "--skip-selftest"])
+    assert rc == 6

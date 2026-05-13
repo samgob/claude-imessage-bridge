@@ -572,6 +572,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reset-cursor", action="store_true",
                         help="re-seed cursor at MAX(rowid); skips backlog. "
                              "Use this AFTER restoring an old state.db.")
+    parser.add_argument(
+        "--skip-selftest", action="store_true",
+        help="DEV ONLY: skip the Bash-deny security selftest. Refused unless "
+             "stdin is a tty (so it cannot land in a launchd plist or "
+             "systemd unit by accident).",
+    )
     args = parser.parse_args(argv)
 
     # Hint to preflight where the config came from (for perms check).
@@ -604,21 +610,41 @@ def main(argv: list[str] | None = None) -> int:
     # boundary still holds across Claude Code version changes — the
     # documented flag semantics drifted at least once already (see
     # adversarial round 3 findings).
-    logger.info("running selftest: verifying Bash denial under current config…")
-    try:
-        claude_runner.selftest_bash_denied(
-            claude_bin=cfg.claude_binary,
-            timeout_seconds=min(cfg.per_call_timeout_seconds, 60),
+    #
+    # --skip-selftest is a DEV-ONLY shortcut. It's load-bearing-dangerous:
+    # if it gets baked into a launchd plist or a systemd unit, the daemon
+    # silently runs without the empirical Bash-deny verification. To
+    # prevent that, we refuse the flag unless stdin is a controlling tty
+    # — launchd/systemd run without one.
+    if args.skip_selftest:
+        if not sys.stdin.isatty():
+            print(
+                "--skip-selftest is only allowed when running interactively "
+                "(stdin is a tty). Refusing to skip the security selftest "
+                "in non-interactive mode.",
+                file=sys.stderr,
+            )
+            return 6
+        logger.warning(
+            "⚠️ SELFTEST SKIPPED — DEV MODE — "
+            "DO NOT USE IN PRODUCTION"
         )
-    except claude_runner.SelfTestFailed as e:
-        logger.error("SECURITY SELF-TEST FAILED: %s", e)
-        return 4
-    except FileNotFoundError as e:
-        logger.error("selftest setup error (claude binary?): %s", e)
-        return 4
-    except Exception as e:
-        logger.exception("selftest crashed: %s", e)
-        return 4
+    else:
+        logger.info("running selftest: verifying Bash denial under current config…")
+        try:
+            claude_runner.selftest_bash_denied(
+                claude_bin=cfg.claude_binary,
+                timeout_seconds=min(cfg.per_call_timeout_seconds, 60),
+            )
+        except claude_runner.SelfTestFailed as e:
+            logger.error("SECURITY SELF-TEST FAILED: %s", e)
+            return 4
+        except FileNotFoundError as e:
+            logger.error("selftest setup error (claude binary?): %s", e)
+            return 4
+        except Exception as e:
+            logger.exception("selftest crashed: %s", e)
+            return 4
 
     logger.info(
         "starting bridge: project_dir=%s allowlist=%d entries debug=%s",
