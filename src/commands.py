@@ -113,11 +113,18 @@ def _status(*, handle: str, state_dir: Path) -> CommandResult:
 
 
 def _sessions(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:
-    """List recent sessions. Stashes numbered options for /pick N."""
-    include_routines = "--all" in raw_arg.lower().split()
+    """List recent sessions. Stashes numbered options for /pick N.
+
+    By default excludes routines (``<scheduled-task>`` transcripts) and
+    bridge-internal sessions (selftests + per-call hermetic sandboxes —
+    these pollute the list with security-plumbing prompts). ``--all``
+    opts both back in.
+    """
+    include_all = "--all" in raw_arg.lower().split()
     sessions = session_discovery.discover_sessions(
         limit=10,
-        include_routines=include_routines,
+        include_routines=include_all,
+        include_bridge_internal=include_all,
     )
     if not sessions:
         return CommandResult(reply="No sessions found.")
@@ -126,7 +133,7 @@ def _sessions(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:
         state_dir=state_dir,
         sessions=sessions,
         header="Recent sessions",
-        footer="Reply /pick <N> to switch. Add --all to include routines.",
+        footer="Reply /pick <N> to switch. Add --all to include routines + bridge internals.",
     )
 
 
@@ -207,7 +214,7 @@ def _build_options_result(
     lines = [header]
     options = []
     for i, s in enumerate(sessions, start=1):
-        marker = " ⚙" if s.is_routine else ""
+        marker = " ⚙" if s.is_routine else (" 🔧" if s.is_bridge_internal else "")
         snippet = s.snippet[:60] or "(no user msg)"
         lines.append(f"[{i}] {s.short_id}{marker} · {s.relative_age()} ago — {snippet}")
         options.append({"id": s.session_id, "snippet": snippet})

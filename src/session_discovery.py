@@ -38,6 +38,29 @@ _STOPWORDS = frozenset({
 
 _ROUTINE_PREFIX = "<scheduled-task"
 
+# Prefixes that mark a session as bridge-internal (created by the bridge's
+# own hermetic per-call sandbox or startup selftest). These are recorded
+# in ~/.claude/projects/ under encoded tempdir names like
+# `-private-var-folders-...-cimb-selftest-XXXX` or `cimb-call-XXXX`. They
+# pollute the /sessions list with non-user content (the selftest is "Use
+# the Bash tool right now to run: echo SELFTEST_FAIL > …", which is
+# security plumbing not a real conversation). Excluded by default.
+_BRIDGE_INTERNAL_CWD_MARKERS: Final = (
+    "cimb-selftest-",  # startup security selftest
+    "cimb-call-",      # hermetic per-call sandbox for normal replies
+)
+
+
+def _is_bridge_internal(cwd: Optional[Path]) -> bool:
+    """True if the session was created inside one of the bridge's own
+    per-call tempdirs (selftest or hermetic reply). These should NOT
+    show up in /sessions by default — they're bridge plumbing, not
+    user-meaningful conversations."""
+    if cwd is None:
+        return False
+    s = str(cwd)
+    return any(marker in s for marker in _BRIDGE_INTERNAL_CWD_MARKERS)
+
 
 @dataclass(frozen=True)
 class SessionInfo:
@@ -48,6 +71,7 @@ class SessionInfo:
     file_path: Path
     size_bytes: int
     is_routine: bool = False
+    is_bridge_internal: bool = False
 
     @property
     def short_id(self) -> str:
@@ -118,12 +142,19 @@ def discover_sessions(
     projects_root: Path = DEFAULT_PROJECTS_ROOT,
     within_cwd: Optional[Path] = None,
     include_routines: bool = False,
+    include_bridge_internal: bool = False,
 ) -> List[SessionInfo]:
     """List recent Claude Code sessions, newest first.
 
     Routines (scheduled-task transcripts) are excluded by default — they
     rarely make useful resume targets. Pass ``include_routines=True`` to
     include them.
+
+    Bridge-internal sessions (the daemon's startup selftest and per-call
+    hermetic sandboxes — cwd contains ``cimb-selftest-`` or ``cimb-call-``)
+    are excluded by default. Selftests in particular pollute the list
+    with security-plumbing prompts. Pass ``include_bridge_internal=True``
+    to include them (the ``/sessions --all`` path opts in).
     """
     if not projects_root.exists():
         return []
@@ -135,7 +166,12 @@ def discover_sessions(
         all_files.extend(project_dir.glob("*.jsonl"))
     all_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
-    expand = (4 if within_cwd else 1) * (3 if not include_routines else 1)
+    # Scan-budget heuristic: with two default-on filters (routines +
+    # bridge-internal) the candidate pool can be much larger than the
+    # final limit, so widen the scan accordingly.
+    expand = (4 if within_cwd else 1)
+    expand *= (3 if not include_routines else 1)
+    expand *= (2 if not include_bridge_internal else 1)
     scan_budget = max(limit * expand, 40)
 
     results: List[SessionInfo] = []
@@ -146,7 +182,10 @@ def discover_sessions(
             continue
         cwd, snippet = _extract_session_metadata(path)
         is_routine = snippet.startswith(_ROUTINE_PREFIX)
+        is_internal = _is_bridge_internal(cwd)
         if not include_routines and is_routine:
+            continue
+        if not include_bridge_internal and is_internal:
             continue
         if within_cwd is not None:
             if cwd is None:
@@ -163,6 +202,7 @@ def discover_sessions(
             file_path=path,
             size_bytes=stat.st_size,
             is_routine=is_routine,
+            is_bridge_internal=is_internal,
         ))
         if len(results) >= limit:
             break
@@ -204,6 +244,7 @@ def search_sessions(
     projects_root: Path = DEFAULT_PROJECTS_ROOT,
     within_cwd: Optional[Path] = None,
     include_routines: bool = False,
+    include_bridge_internal: bool = False,
     exclude_session_ids: Optional[set[str]] = None,
 ) -> List[SessionInfo]:
     """Find sessions matching a natural-language query, newest first.
@@ -211,6 +252,9 @@ def search_sessions(
     Tokenized query (stopwords + recency hints stripped). ALL tokens must
     appear in the transcript body. Recency-first sort. Relevance floor: if
     any match has 2+ hits, 1-hit incidentals are dropped.
+
+    Excludes routines and bridge-internal sessions by default; mirror
+    flags forwarded to ``discover_sessions``.
     """
     tokens = _tokenize_query(query)
     if not tokens:
@@ -221,6 +265,7 @@ def search_sessions(
         projects_root=projects_root,
         within_cwd=within_cwd,
         include_routines=include_routines,
+        include_bridge_internal=include_bridge_internal,
     )
     excluded = exclude_session_ids or set()
     scored: list[tuple[int, float, SessionInfo]] = []
@@ -263,5 +308,6 @@ def find_by_id(
                 file_path=candidate,
                 size_bytes=stat.st_size,
                 is_routine=snippet.startswith(_ROUTINE_PREFIX),
+                is_bridge_internal=_is_bridge_internal(cwd),
             )
     return None
