@@ -220,6 +220,8 @@ def _user_facing_error(category: Optional[str]) -> str:
         return "⚠️ Got a malformed response from Claude. Check daemon logs."
     if category == "claude_error":
         return "⚠️ Claude reported an error. Try again."
+    if category == "resume_missing":
+        return "⚠️ Couldn't resume that session — it's no longer on disk. Try again to start a fresh one."
     return "⚠️ Reply unavailable. Check daemon logs."
 
 
@@ -514,6 +516,26 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     # transcript context loads, but tool authority is still gated by
     # --disallowed-tools (resume doesn't grant new tool authority).
     resume_id = state.get_current_session(norm)
+
+    # Stale-session pre-check: if the stored session id no longer exists
+    # on disk (e.g., it was a hermetic-tempdir session from a previous
+    # chat_only run, since cleaned up), claude --resume would exit 1
+    # with "No conversation found." Clear the stale pointer and let this
+    # call start fresh.
+    #
+    # This can also fire if Sam manually rotated ~/.claude/projects/, or
+    # if a backup-restore of state.db references sessions no longer on
+    # disk.
+    if resume_id is not None:
+        from . import session_discovery
+        if session_discovery.find_by_id(resume_id) is None:
+            logger.info(
+                "session %s gone from disk; clearing per-handle pointer for %s",
+                resume_id[:8], redacted,
+            )
+            state.set_current_session(norm, None)
+            resume_id = None
+            _metrics["stale_session_cleared"] += 1
     # Trust mode resolution. For now, no per-alias override (alias state
     # isn't tracked per-handle yet — that lands in chunk 4 with schema v3).
     # Default-only resolution gives the right preset for the common case.
@@ -548,6 +570,31 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             resume_session_id=resume_id,
             extra_context=extra_context,
         )
+
+        # Post-failure recovery for stale-session resume. claude_runner
+        # detects the "No conversation found" stderr and reports
+        # error_category="resume_missing". We clear the per-handle
+        # pointer and retry the SAME message fresh, so the user sees
+        # one reply (the fresh one), not two.
+        if (not result.success
+                and result.error_category == "resume_missing"
+                and resume_id is not None):
+            logger.info(
+                "auto-recover: resume %s failed, retrying fresh for %s",
+                resume_id[:8], redacted,
+            )
+            state.set_current_session(norm, None)
+            _metrics["stale_session_recovered"] += 1
+            result = claude_runner.run_claude(
+                msg.body,
+                trust_preset=active_preset,
+                project_directory=cfg.project_directory,
+                allowed_tools_addons=cfg.allowed_tools,
+                timeout_seconds=cfg.per_call_timeout_seconds,
+                claude_bin=cfg.claude_binary,
+                resume_session_id=None,  # fresh
+                extra_context=extra_context,
+            )
     except claude_runner.RunnerConfigError as e:
         logger.error("runner config error: %s", e)
         result = claude_runner.ClaudeResult(

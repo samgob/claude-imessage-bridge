@@ -645,6 +645,28 @@ def run_claude(
         if proc.returncode != 0:
             logger.warning("claude -p exit=%d stderr_tail=%r",
                            proc.returncode, (stderr or "")[-500:])
+            # Detect the specific "stale session" error so the daemon can
+            # auto-recover (clear the per-handle pointer + retry fresh).
+            # Claude's exit-1 message format is stable enough to match
+            # by substring; if Anthropic changes the wording, the daemon
+            # falls back to the generic "exec_error" path and the user
+            # gets a one-message stutter before recovering on the next.
+            stderr_text = ""
+            if stderr:
+                try:
+                    stderr_text = (
+                        stderr.decode("utf-8", errors="replace")
+                        if isinstance(stderr, bytes) else stderr
+                    )
+                except Exception:
+                    stderr_text = ""
+            if resume_session_id and "No conversation found" in stderr_text:
+                return ClaudeResult(
+                    success=False, reply="", session_id=None, cost_usd=0.0,
+                    duration_ms=duration,
+                    error=f"resume session {resume_session_id[:8]} not on disk",
+                    error_category="resume_missing",
+                )
             return ClaudeResult(
                 success=False, reply="", session_id=None, cost_usd=0.0,
                 duration_ms=duration,

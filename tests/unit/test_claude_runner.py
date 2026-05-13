@@ -423,6 +423,57 @@ def test_run_claude_handles_non_zero_exit(monkeypatch, fake_claude_binary):
     assert "/Users/x/.claude" not in (r.error or "")
 
 
+def test_run_claude_detects_stale_session_resume(monkeypatch, fake_claude_binary):
+    """Claude exits 1 with 'No conversation found' when --resume points at
+    a session that's not on disk. The runner detects this specific stderr
+    and returns error_category='resume_missing' so the daemon can clear
+    the stale pointer and retry fresh."""
+    proc = _FakeProc({}, returncode=1)
+    proc._stdout = b""
+    proc._stderr = (
+        b"No conversation found with session ID: "
+        b"eff33daf-1ae1-422a-b291-9cd8bac21c8d\n"
+    )
+    monkeypatch.setattr(
+        claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
+    )
+    r = claude_runner.run_claude(
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+        resume_session_id="eff33daf-1ae1-422a-b291-9cd8bac21c8d",
+    )
+    assert not r.success
+    assert r.error_category == "resume_missing"
+    # The stale id is acknowledged in the error string (prefix only,
+    # not the full id — we don't leak the session id externally).
+    assert "eff33daf" in (r.error or "")
+
+
+def test_run_claude_resume_missing_only_fires_with_resume_arg(monkeypatch, fake_claude_binary):
+    """If the same stderr arrives but the call wasn't using --resume,
+    classify as plain exec_error (not resume_missing) — there's no
+    pointer to clear."""
+    proc = _FakeProc({}, returncode=1)
+    proc._stdout = b""
+    proc._stderr = b"No conversation found with session ID: anything\n"
+    monkeypatch.setattr(
+        claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
+    )
+    r = claude_runner.run_claude(
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+        resume_session_id=None,  # no resume requested
+    )
+    assert not r.success
+    assert r.error_category == "exec_error"
+
+
 def test_run_claude_handles_malformed_json(monkeypatch, fake_claude_binary):
     proc = _FakeProc({})
     proc._stdout = b"not json at all"
