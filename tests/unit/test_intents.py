@@ -113,6 +113,16 @@ def test_readonly_intents_have_empty_paraphrase():
     "I love bridges",            # "bridge" alone shouldn't fire /halt
     "what time is it",           # not a recognized intent
     "can you help me with...",   # "help me" isn't "help"
+    # Regression: "X status" must NOT trigger /status. This was a real
+    # live-test bug — "What's Wesco status?" got routed to /status.
+    "What's Wesco status?",
+    "what's the status of the samsung deal",
+    "wesco status",
+    "status of the q4 forecast",
+    "status report on Brian",
+    # Regression: "what happened" must NOT trigger /tail-audit.
+    "what happened with wesco yesterday",
+    "what happened on the LexisNexis call",
 ])
 def test_classify_intent_no_false_positives(body):
     intent = intents.classify_intent(body)

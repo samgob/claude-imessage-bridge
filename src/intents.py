@@ -124,8 +124,15 @@ _INTENTS: List[dict] = [
         "destructive": False,
         "paraphrase": "",
         "patterns": [
-            r"\bstatus\b",
-            r"\b(how are you|how'?s it going)\b",
+            # Bare "status" or "status?" — alone on a line, not embedded
+            # in "wesco status" or "samsung status."
+            r"^\s*status\??\s*$",
+            # Explicit "bridge/daemon/claude status"
+            r"\b(bridge|daemon|claude) status\b",
+            r"\bstatus of (the )?(bridge|daemon|claude)\b",
+            # Conversational openings
+            r"^\s*how are you\b",
+            r"^\s*how'?s it going\b",
             r"\bare you (alive|up|running|working|ok)\b",
             r"\bare you there\b",
         ],
@@ -186,7 +193,8 @@ _INTENTS: List[dict] = [
         "destructive": False,
         "paraphrase": "",
         "patterns": [
-            r"\b(audit (log|trail)|recent activity|what happened|recent events)\b",
+            r"\b(audit (log|trail)|recent activity|recent events|audit history)\b",
+            r"^\s*audit\??\s*$",
         ],
     },
     {
