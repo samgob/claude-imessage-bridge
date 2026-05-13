@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import session_discovery, state
 
@@ -44,8 +44,16 @@ def parse_and_dispatch(
     *,
     handle: str,
     state_dir: Path,
+    aliases: Optional[Dict[str, str]] = None,
 ) -> CommandResult:
-    """Parse a /command and return its CommandResult."""
+    """Parse a /command and return its CommandResult.
+
+    ``aliases`` is the session-alias map from config (name → session UUID,
+    keys already case-folded). Used by /use and /aliases. None means
+    "no aliases configured" — the dispatcher behaves as it did pre-aliases.
+    """
+    if aliases is None:
+        aliases = {}
     text = body.strip()
     if not text.startswith("/"):
         return CommandResult(
@@ -62,11 +70,13 @@ def parse_and_dispatch(
     if cmd == "/sessions":
         return _sessions(handle=handle, state_dir=state_dir, raw_arg=arg)
     if cmd == "/use":
-        return _use(handle=handle, state_dir=state_dir, query=arg)
+        return _use(handle=handle, state_dir=state_dir, query=arg, aliases=aliases)
     if cmd == "/pick":
         return _pick(handle=handle, state_dir=state_dir, raw_arg=arg)
     if cmd == "/status":
         return _status(handle=handle, state_dir=state_dir)
+    if cmd == "/aliases":
+        return _aliases(aliases=aliases)
     return CommandResult(
         reply=(
             f"Unknown command {cmd!r}. Try /help for the list, or send a "
@@ -82,8 +92,9 @@ def _help() -> CommandResult:
         "/new — start a fresh session\n"
         "/status — current session info\n"
         "/sessions — list recent sessions (numbered)\n"
-        "/use <query> — search by keyword; shows matches as numbered list\n"
+        "/use <query> — alias or keyword search; resumes a session\n"
         "/pick <N> — switch to a numbered match from the last list\n"
+        "/aliases — list configured session aliases\n"
         "\n"
         "Anything else continues your current session."
     ))
@@ -137,33 +148,103 @@ def _sessions(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:
     )
 
 
-def _use(*, handle: str, state_dir: Path, query: str) -> CommandResult:
-    """Search sessions by keyword. Auto-resume if single match; numbered list otherwise."""
+def _use(
+    *,
+    handle: str,
+    state_dir: Path,
+    query: str,
+    aliases: Optional[Dict[str, str]] = None,
+) -> CommandResult:
+    """Search sessions by keyword. Auto-resume if single match; numbered list otherwise.
+
+    If ``aliases`` contains a case-insensitive exact match for the query,
+    use that session id directly. If the alias points at a session that's
+    no longer on disk, fall through to keyword search with a note appended
+    to the reply.
+    """
     if not query:
         return CommandResult(reply="Usage: /use <keyword>. Example: /use auth-refactor")
+
+    aliases = aliases or {}
+    alias_note = ""
+    alias_key = query.strip().lower()
+    if alias_key in aliases:
+        sid = aliases[alias_key]
+        info = session_discovery.find_by_id(sid)
+        if info is not None:
+            return CommandResult(
+                reply=(
+                    f"Resumed (alias {alias_key!r}) {info.short_id} · "
+                    f"{info.relative_age()} ago\n"
+                    f"Last user msg: {info.snippet[:120]}"
+                ),
+                set_session_id=info.session_id,
+            )
+        logger.warning(
+            "alias %r points at session %s which is no longer on disk; "
+            "falling through to keyword search", alias_key, sid[:8],
+        )
+        alias_note = (
+            f"(alias {alias_key!r} points at a session that's gone — "
+            "searching by keyword)\n"
+        )
+
     current = state.get_current_session(handle, state_dir=state_dir)
     excluded = {current} if current else set()
     sessions = session_discovery.search_sessions(
         query, limit=10, exclude_session_ids=excluded,
     )
     if not sessions:
-        return CommandResult(reply=f"No sessions match {query!r}.")
+        return CommandResult(reply=f"{alias_note}No sessions match {query!r}.")
     if len(sessions) == 1:
         target = sessions[0]
         return CommandResult(
             reply=(
+                f"{alias_note}"
                 f"Resumed {target.short_id} · {target.relative_age()} ago\n"
                 f"Last user msg: {target.snippet[:120]}"
             ),
             set_session_id=target.session_id,
         )
-    return _build_options_result(
+    result = _build_options_result(
         handle=handle,
         state_dir=state_dir,
         sessions=sessions,
         header=f"Matches for {query!r}",
         footer="Reply /pick <N> to switch.",
     )
+    if alias_note:
+        # Prepend the alias-miss note to the options reply.
+        return CommandResult(
+            reply=alias_note + result.reply,
+            set_session_id=result.set_session_id,
+            clear_session=result.clear_session,
+        )
+    return result
+
+
+def _aliases(*, aliases: Dict[str, str]) -> CommandResult:
+    """List configured aliases with on-disk status."""
+    if not aliases:
+        return CommandResult(reply=(
+            "No aliases configured. Add a session_aliases block to "
+            "config.yaml — see config.example.yaml."
+        ))
+    lines = ["Configured aliases:"]
+    for name in sorted(aliases.keys()):
+        sid = aliases[name]
+        info = session_discovery.find_by_id(sid)
+        if info is None:
+            lines.append(f"{name} · {sid[:8]} · <missing on disk>")
+        else:
+            snippet = (info.snippet[:60] or "(no user msg)").strip()
+            lines.append(
+                f"{name} · {info.short_id} · {info.relative_age()} ago "
+                f"({snippet})"
+            )
+    lines.append("")
+    lines.append("Send /use <name> to resume.")
+    return CommandResult(reply="\n".join(lines))
 
 
 def _pick(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:

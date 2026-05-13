@@ -95,3 +95,17 @@ claude_binary: /usr/local/bin/claude
 # Log message bodies (incoming and outgoing) to STDERR (not state.db).
 # OFF by default — leaks content into terminal/launchd logs.
 debug: false
+
+# Optional shortcuts for /use. Each key is a short name (^[a-z0-9_-]{1,32}$,
+# case-insensitive); the value is the Claude Code session UUID you want
+# /use <name> to resume. The bridge does a case-insensitive exact match
+# BEFORE running the keyword search, so /use wesco resumes that specific
+# session even if the keyword would also match other sessions.
+#
+# Value can be either a plain string UUID or a mapping with an `id` field
+# (the mapping form leaves room for future per-alias options).
+#
+# session_aliases:
+#   wesco: 4fe39c70-21d7-467e-801b-ca3167ac130f
+#   arden: {id: 8a1b2c3d-4e5f-6789-abcd-ef0123456789}
+session_aliases: {}

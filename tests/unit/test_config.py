@@ -246,6 +246,153 @@ def test_load_refuses_world_writable_claude_binary(tmp_path: Path):
         config_mod.load(cfg_path)
 
 
+# --- session_aliases ---------------------------------------------------
+
+def test_load_no_aliases_section_defaults_empty(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write(cfg_path, _good_yaml(project, fake_claude_binary))
+    cfg = config_mod.load(cfg_path)
+    assert cfg.session_aliases == {}
+
+
+def test_load_aliases_string_form(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {
+        "wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+    }
+    _write(cfg_path, data)
+    cfg = config_mod.load(cfg_path)
+    assert cfg.session_aliases == {
+        "wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+    }
+
+
+def test_load_aliases_mapping_form(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {
+        "arden": {"id": "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001"},
+    }
+    _write(cfg_path, data)
+    cfg = config_mod.load(cfg_path)
+    # Mapping form normalizes to flat name → uuid.
+    assert cfg.session_aliases == {
+        "arden": "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001",
+    }
+
+
+def test_load_aliases_case_folds_keys(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {
+        "WESCO": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+    }
+    _write(cfg_path, data)
+    cfg = config_mod.load(cfg_path)
+    assert "wesco" in cfg.session_aliases
+    assert "WESCO" not in cfg.session_aliases
+
+
+def test_load_refuses_bad_alias_key(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {
+        "has spaces": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+    }
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="session_aliases"):
+        config_mod.load(cfg_path)
+
+
+def test_load_refuses_overly_long_alias_key(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {
+        "x" * 33: "4fe39c70-21d7-467e-801b-ca3167ac130f",
+    }
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="session_aliases"):
+        config_mod.load(cfg_path)
+
+
+def test_load_refuses_bad_alias_uuid(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {"wesco": "not-a-real-uuid!"}
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="session_aliases"):
+        config_mod.load(cfg_path)
+
+
+def test_load_refuses_mapping_without_id(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = {
+        "wesco": {"profile": "default"},  # missing id
+    }
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="id"):
+        config_mod.load(cfg_path)
+
+
+def test_load_refuses_non_mapping_aliases_top_level(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    data["session_aliases"] = ["wesco", "arden"]  # list, not mapping
+    _write(cfg_path, data)
+    with pytest.raises(ValueError, match="session_aliases"):
+        config_mod.load(cfg_path)
+
+
+def test_load_aliases_duplicate_after_casefold(tmp_path: Path, fake_claude_binary: Path):
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    # Duplicate after case-folding: YAML would already collapse exact dupes,
+    # but a mix of cases lets us simulate it.
+    raw = """\
+project_directory: {pd}
+allowlist: ["+15551234567"]
+allow_group_chat_guids: []
+allowed_tools: []
+forbidden_tools: []
+poll_interval_seconds: 3.0
+reply_rate_limit_per_minute: 10
+daily_cost_cap_usd: 5.0
+per_call_cost_cap_usd: 0.50
+per_call_max_turns: 1
+per_call_timeout_seconds: 90
+circuit_breaker_failures: 5
+claude_binary: {cb}
+debug: false
+session_aliases:
+  wesco: "4fe39c70-21d7-467e-801b-ca3167ac130f"
+  WESCO: "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001"
+""".format(pd=str(project), cb=str(fake_claude_binary))
+    cfg_path.write_text(raw)
+    with pytest.raises(ValueError, match="duplicate"):
+        config_mod.load(cfg_path)
+
+
 def test_load_accepts_symlinked_claude_binary(tmp_path: Path):
     """Homebrew installs claude as a symlink; that must work."""
     real_dir = tmp_path / "Cellar"

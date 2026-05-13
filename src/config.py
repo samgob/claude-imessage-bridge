@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import yaml
 
@@ -30,6 +31,11 @@ from .claude_runner import DEFAULT_CLAUDE_BIN, HARD_FORBIDDEN_TOOLS
 from .imessage_sender import HandleError, validate_handle
 
 logger = logging.getLogger(__name__)
+
+
+# Session-alias key/value validation regexes.
+_ALIAS_KEY_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_ALIAS_UUID_RE = re.compile(r"^[a-f0-9-]{8,40}$")
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,9 @@ class Config:
     circuit_breaker_failures: int        # consecutive failures -> auto-PAUSE
     claude_binary: str
     debug: bool
+    # name → session UUID. Always resolved to a flat dict-of-str regardless
+    # of whether the YAML input was a string or a {id: <uuid>} mapping.
+    session_aliases: Dict[str, str] = field(default_factory=dict)
 
     @property
     def allowlist_set(self) -> set:
@@ -147,6 +156,76 @@ def _validate_tools(allowed: List[str], forbidden: List[str]) -> None:
         )
 
 
+def _parse_session_aliases(raw: dict) -> Dict[str, str]:
+    """Parse the optional ``session_aliases`` block.
+
+    Accepted value shapes per entry:
+      - Plain string: ``wesco: 4fe39c70-21d7-...``
+      - Mapping with ``id`` key: ``wesco: {id: 4fe39c70-..., profile: foo}``
+        (the mapping form is forward-compatible with later additions
+        like ``profile``; we currently only read ``id``).
+
+    Returns a flat ``{name: uuid}`` dict. Names are case-folded to lower
+    so ``/use Wesco`` and ``/use wesco`` resolve identically.
+
+    Raises ``ValueError`` on:
+      - non-dict top-level value
+      - bad key (must match ^[a-z0-9_-]{1,32}$, post-casefold)
+      - mapping value missing the ``id`` field
+      - id that doesn't look like a session UUID (^[a-f0-9-]{8,40}$)
+    """
+    raw_aliases = raw.get("session_aliases") or {}
+    if not isinstance(raw_aliases, dict):
+        raise ValueError("session_aliases must be a mapping (name → uuid)")
+
+    parsed: Dict[str, str] = {}
+    for name, value in raw_aliases.items():
+        if not isinstance(name, str):
+            raise ValueError(
+                f"session_aliases keys must be strings, got {type(name).__name__}"
+            )
+        key = name.lower()
+        if not _ALIAS_KEY_RE.match(key):
+            raise ValueError(
+                f"session_aliases key {name!r} invalid; must match "
+                "^[a-z0-9_-]{1,32}$ (case-insensitive)"
+            )
+
+        if isinstance(value, str):
+            uuid_str = value
+        elif isinstance(value, dict):
+            if "id" not in value:
+                raise ValueError(
+                    f"session_aliases[{name!r}] is a mapping but has no 'id' field"
+                )
+            uuid_raw = value["id"]
+            if not isinstance(uuid_raw, str):
+                raise ValueError(
+                    f"session_aliases[{name!r}].id must be a string, got "
+                    f"{type(uuid_raw).__name__}"
+                )
+            uuid_str = uuid_raw
+        else:
+            raise ValueError(
+                f"session_aliases[{name!r}] must be a string UUID or a "
+                f"mapping with an 'id' field; got {type(value).__name__}"
+            )
+
+        if not _ALIAS_UUID_RE.match(uuid_str):
+            raise ValueError(
+                f"session_aliases[{name!r}] value {uuid_str!r} doesn't look "
+                "like a session UUID (expected ^[a-f0-9-]{8,40}$)"
+            )
+        if key in parsed:
+            raise ValueError(
+                f"session_aliases has duplicate key {key!r} (after "
+                "case-folding) — names must be unique"
+            )
+        parsed[key] = uuid_str
+
+    return parsed
+
+
 def load(path: Path) -> Config:
     """Load + validate config. Raises on any structural error."""
     if not path.exists():
@@ -233,6 +312,8 @@ def load(path: Path) -> Config:
 
     debug = bool(raw.get("debug", False))
 
+    session_aliases = _parse_session_aliases(raw)
+
     return Config(
         project_directory=project_dir,
         allowlist=allowlist,
@@ -248,4 +329,5 @@ def load(path: Path) -> Config:
         circuit_breaker_failures=breaker,
         claude_binary=claude_bin,
         debug=debug,
+        session_aliases=session_aliases,
     )

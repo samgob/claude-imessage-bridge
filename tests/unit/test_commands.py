@@ -252,3 +252,132 @@ def test_unknown_command_returns_help_hint(state_dir: Path):
     r = commands.parse_and_dispatch("/bogus", handle=HANDLE, state_dir=state_dir)
     assert "Unknown command" in r.reply
     assert "/help" in r.reply
+
+
+# --- /use with aliases -------------------------------------------------
+
+def test_use_alias_hit_resumes_directly(state_dir: Path, monkeypatch):
+    """Configured alias matches: skip keyword search, resume the named sid."""
+    aliases = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    info = session_discovery.SessionInfo(
+        session_id="4fe39c70-21d7-467e-801b-ca3167ac130f",
+        cwd=None,
+        last_modified=datetime.now(timezone.utc),
+        snippet="Wesco POC notes",
+        file_path=Path("/fake/4fe39c70.jsonl"),
+        size_bytes=200,
+    )
+    monkeypatch.setattr(
+        session_discovery, "find_by_id",
+        lambda sid: info if sid == aliases["wesco"] else None,
+    )
+    # search_sessions must NOT be called on the happy alias path.
+    def fail_search(*args, **kwargs):
+        raise AssertionError("alias hit should skip keyword search")
+    monkeypatch.setattr(session_discovery, "search_sessions", fail_search)
+
+    r = commands.parse_and_dispatch(
+        "/use wesco", handle=HANDLE, state_dir=state_dir, aliases=aliases,
+    )
+    assert r.set_session_id == aliases["wesco"]
+    assert "alias 'wesco'" in r.reply
+    assert "Resumed" in r.reply
+
+
+def test_use_alias_case_insensitive(state_dir: Path, monkeypatch):
+    """/use Wesco and /use WESCO must resolve the same as /use wesco."""
+    aliases = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    info = session_discovery.SessionInfo(
+        session_id=aliases["wesco"],
+        cwd=None,
+        last_modified=datetime.now(timezone.utc),
+        snippet="x",
+        file_path=Path("/fake/x.jsonl"),
+        size_bytes=10,
+    )
+    monkeypatch.setattr(session_discovery, "find_by_id", lambda sid: info)
+    for q in ("/use Wesco", "/use WESCO", "/use wesco", "/use  wesco  "):
+        r = commands.parse_and_dispatch(
+            q, handle=HANDLE, state_dir=state_dir, aliases=aliases,
+        )
+        assert r.set_session_id == aliases["wesco"], (
+            f"query {q!r} failed to match alias"
+        )
+
+
+def test_use_alias_miss_falls_through(state_dir: Path, monkeypatch):
+    """Alias points at a vanished session → keyword search still runs."""
+    aliases = {"arden": "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001"}
+    monkeypatch.setattr(session_discovery, "find_by_id", lambda sid: None)
+    fallback = _mk_session("fallback-1", snippet="arden insurance")
+    monkeypatch.setattr(
+        session_discovery, "search_sessions",
+        lambda q, limit, exclude_session_ids: [fallback],
+    )
+    r = commands.parse_and_dispatch(
+        "/use arden", handle=HANDLE, state_dir=state_dir, aliases=aliases,
+    )
+    assert "alias 'arden'" in r.reply  # the miss note
+    assert "points at a session that's gone" in r.reply
+    assert r.set_session_id == "fallback-1"
+
+
+def test_use_no_alias_match_falls_through(state_dir: Path, monkeypatch):
+    """Query doesn't match any alias → regular keyword search runs."""
+    aliases = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    captured = {}
+
+    def fake_search(q, limit, exclude_session_ids):
+        captured["q"] = q
+        return [_mk_session("kw-hit-1")]
+
+    monkeypatch.setattr(session_discovery, "search_sessions", fake_search)
+    monkeypatch.setattr(session_discovery, "find_by_id", lambda sid: None)
+
+    r = commands.parse_and_dispatch(
+        "/use somethingelse", handle=HANDLE, state_dir=state_dir,
+        aliases=aliases,
+    )
+    assert captured["q"] == "somethingelse"
+    assert r.set_session_id == "kw-hit-1"
+    # No alias-miss note (the query didn't match any alias).
+    assert "alias" not in r.reply
+
+
+# --- /aliases command --------------------------------------------------
+
+def test_aliases_empty_message(state_dir: Path):
+    r = commands.parse_and_dispatch(
+        "/aliases", handle=HANDLE, state_dir=state_dir, aliases={},
+    )
+    assert "No aliases configured" in r.reply
+
+
+def test_aliases_lists_with_age_and_snippet(state_dir: Path, monkeypatch):
+    aliases = {
+        "wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+        "arden": "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001",
+    }
+    wesco_info = session_discovery.SessionInfo(
+        session_id=aliases["wesco"], cwd=None,
+        last_modified=datetime.now(timezone.utc),
+        snippet="POC deck for Wesco", file_path=Path("/fake/w.jsonl"),
+        size_bytes=10,
+    )
+    monkeypatch.setattr(
+        session_discovery, "find_by_id",
+        lambda sid: wesco_info if sid == aliases["wesco"] else None,
+    )
+    r = commands.parse_and_dispatch(
+        "/aliases", handle=HANDLE, state_dir=state_dir, aliases=aliases,
+    )
+    assert "wesco" in r.reply
+    assert "arden" in r.reply
+    assert "missing on disk" in r.reply  # arden has no info
+    assert "POC deck for Wesco" in r.reply  # wesco has snippet
+    assert "/use <name>" in r.reply  # footer
+
+
+def test_help_mentions_aliases(state_dir: Path):
+    r = commands.parse_and_dispatch("/help", handle=HANDLE, state_dir=state_dir)
+    assert "/aliases" in r.reply
