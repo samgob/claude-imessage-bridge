@@ -37,6 +37,7 @@ from . import config as config_mod
 from . import health
 from . import imessage_reader
 from . import imessage_sender
+from . import memory as memory_mod
 from . import state
 from . import trust as trust_mod
 
@@ -48,6 +49,14 @@ HEARTBEAT_INTERVAL_SECONDS = 300
 
 _running = True
 _metrics: Counter = Counter()
+
+# Memory backend is instantiated once at startup so its cache survives
+# across messages. The /sources command also reads from this instance's
+# last-call source list (which it exposes via a small recorder helper).
+_memory_backend: Optional[memory_mod.MemoryBackend] = None
+# Last-call source list for the /sources command. Mutated on every
+# context_for call; read by commands._sources.
+_last_memory_sources: list = []
 
 
 # --- Self-chat echo prevention ------------------------------------------
@@ -416,6 +425,21 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         trust_per_alias=cfg.trust_per_alias,
         active_alias=None,
     )
+
+    # Memory backend pulls curated context. NoneBackend (the default,
+    # and what chat_only trust mode uses) returns empty — same behavior
+    # as pre-memory. In coding/full modes with claude_md backend, this
+    # injects CLAUDE.md + relevance-matched memory files into the
+    # system prompt.
+    global _last_memory_sources
+    if _memory_backend is not None and active_preset.memory_backend != "none":
+        mem_result = _memory_backend.context_for(msg.body)
+        extra_context = mem_result.text
+        _last_memory_sources = list(mem_result.sources)
+    else:
+        extra_context = ""
+        _last_memory_sources = []
+
     try:
         result = claude_runner.run_claude(
             msg.body,
@@ -425,6 +449,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             timeout_seconds=cfg.per_call_timeout_seconds,
             claude_bin=cfg.claude_binary,
             resume_session_id=resume_id,
+            extra_context=extra_context,
         )
     except claude_runner.RunnerConfigError as e:
         logger.error("runner config error: %s", e)
@@ -714,11 +739,28 @@ def main(argv: list[str] | None = None) -> int:
                 logger.exception("selftest crashed: %s", e)
                 return 4
 
+    # Memory backend instantiation. NoneBackend if config says so OR if
+    # the trust default is chat_only (chat_only NEVER loads memory
+    # regardless of memory.backend setting — defense in depth).
+    global _memory_backend
+    if cfg.trust_default == "chat_only" or cfg.memory_backend == "none":
+        _memory_backend = memory_mod.NoneBackend()
+        logger.info("memory backend: none (trust=%s, configured=%s)",
+                    cfg.trust_default, cfg.memory_backend)
+    else:
+        _memory_backend = memory_mod.build_backend(
+            backend_name=cfg.memory_backend,
+            claude_md_params=cfg.memory_claude_md,
+            custom_params=cfg.memory_custom,
+        )
+        logger.info("memory backend: %s", cfg.memory_backend)
+
     logger.info(
-        "starting bridge: project_dir=%s allowlist=%d entries debug=%s",
+        "starting bridge: project_dir=%s allowlist=%d entries debug=%s trust=%s",
         cfg.project_directory,
         len(cfg.allowlist),
         cfg.debug,
+        cfg.trust_default,
     )
 
     # First-run or reset cursor seeding.
