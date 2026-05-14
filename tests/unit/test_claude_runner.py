@@ -452,6 +452,109 @@ def test_run_claude_detects_stale_session_resume(monkeypatch, fake_claude_binary
     assert "eff33daf" in (r.error or "")
 
 
+def test_run_claude_extracts_permission_denials(monkeypatch, fake_claude_binary):
+    """When claude reports permission_denials in its JSON, the runner
+    extracts them into ClaudeResult so the daemon can act."""
+    monkeypatch.setattr(
+        claude_runner.subprocess, "Popen",
+        lambda argv, **kw: _FakeProc({
+            "result": "I tried to edit CLAUDE.md but was blocked.",
+            "session_id": "sess-abc",
+            "total_cost_usd": 0.05,
+            "permission_denials": [
+                {"tool_name": "Edit",
+                 "tool_input": {"file_path": "/Users/sam/.claude/CLAUDE.md"}},
+            ],
+            "is_error": False,
+        }),
+    )
+    r = claude_runner.run_claude(
+        "update memory",
+        trust_preset=trust.PRESET_FULL,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+    )
+    assert r.success
+    assert len(r.permission_denials) == 1
+    assert r.permission_denials[0]["tool_name"] == "Edit"
+
+
+def test_run_claude_empty_permission_denials_default(monkeypatch, fake_claude_binary):
+    """A normal success with no denials reports an empty list (not None)."""
+    monkeypatch.setattr(
+        claude_runner.subprocess, "Popen",
+        lambda argv, **kw: _FakeProc({
+            "result": "ok",
+            "session_id": "sess-abc",
+            "total_cost_usd": 0.01,
+        }),
+    )
+    r = claude_runner.run_claude(
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+    )
+    assert r.success
+    assert r.permission_denials == []
+
+
+def test_run_claude_permission_relay_retry_passes_acceptEdits(monkeypatch, fake_claude_binary):
+    """When permission_relay_retry=True, argv includes
+    --permission-mode=acceptEdits and the safety check accepts it."""
+    holder = {}
+
+    def fake_popen(argv, **kwargs):
+        holder["argv"] = list(argv)
+        return _FakeProc({"result": "applied", "session_id": "x", "total_cost_usd": 0.02})
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
+    r = claude_runner.run_claude(
+        "please proceed",
+        trust_preset=trust.PRESET_FULL,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+        permission_relay_retry=True,
+    )
+    assert r.success
+    assert "--permission-mode=acceptEdits" in holder["argv"]
+
+
+def test_run_claude_default_call_rejects_acceptEdits_in_argv():
+    """Plain _assert_safe_argv (no override) refuses
+    --permission-mode=acceptEdits. The relay path opts in explicitly;
+    a regression accidentally adding it elsewhere is still blocked."""
+    argv = ["/usr/local/bin/claude", "-p", "--permission-mode=acceptEdits"]
+    with pytest.raises(claude_runner.RunnerConfigError):
+        claude_runner._assert_safe_argv(argv)
+
+
+def test_run_claude_assert_safe_argv_with_acceptEdits_override():
+    """When the caller passes allow_overrides containing the token,
+    it's accepted."""
+    argv = ["/usr/local/bin/claude", "-p", "--permission-mode=acceptEdits", "--", "x"]
+    claude_runner._assert_safe_argv(
+        argv,
+        allow_overrides=frozenset({"--permission-mode=acceptEdits"}),
+    )  # must not raise
+
+
+def test_run_claude_bypassPermissions_never_allowed_even_with_override():
+    """--permission-mode=bypassPermissions is permanently refused.
+    Even an explicit override doesn't unlock it — it disables Claude
+    Code's entire permission system, which is too dangerous to ever
+    grant from the bridge."""
+    argv = ["claude", "-p", "--permission-mode=bypassPermissions", "--", "x"]
+    with pytest.raises(claude_runner.RunnerConfigError):
+        claude_runner._assert_safe_argv(
+            argv,
+            allow_overrides=frozenset({"--permission-mode=bypassPermissions"}),
+        )
+
+
 def test_run_claude_resume_missing_only_fires_with_resume_arg(monkeypatch, fake_claude_binary):
     """If the same stderr arrives but the call wasn't using --resume,
     classify as plain exec_error (not resume_missing) — there's no

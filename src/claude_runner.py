@@ -54,7 +54,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Iterable, Optional
 
@@ -201,7 +201,14 @@ class ClaudeResult:
     cost_usd: float
     duration_ms: int
     error: Optional[str] = None
-    error_category: Optional[str] = None  # "timeout" | "exec_error" | "json_parse" | "claude_error"
+    error_category: Optional[str] = None  # "timeout" | "exec_error" | "json_parse" | "claude_error" | "resume_missing"
+    # Permission denials reported by claude in the JSON output. Each entry
+    # is the raw dict from `parsed["permission_denials"]` — usually
+    # `{"tool_name": "Edit", "tool_input": {"file_path": "..."}}` or
+    # similar. Empty list means no denials. The daemon uses this to
+    # surface a "Claude wanted to edit X — approve?" prompt and retry
+    # with --permission-mode=acceptEdits on confirmation.
+    permission_denials: list = field(default_factory=list)
 
 
 class RunnerConfigError(RuntimeError):
@@ -224,7 +231,9 @@ def _validate_tool_list(tools: list[str]) -> None:
         )
 
 
-def _assert_safe_argv(argv: list[str]) -> None:
+def _assert_safe_argv(
+    argv: list[str], *, allow_overrides: Optional[frozenset] = None
+) -> None:
     """Refuse to exec argv containing any denylisted token (exact or prefix).
 
     The prefix-form (``--flag=value``) check derives from ARGV_DENYLIST
@@ -232,17 +241,43 @@ def _assert_safe_argv(argv: list[str]) -> None:
     coverage consistent if a flag is later added/removed (round-4 solver
     finding T2.R / adversarial #8). Entries in ARGV_DENYLIST that already
     contain ``=`` are exact-match only (e.g., ``--permission-mode=…``).
+
+    ``allow_overrides`` is a frozenset of specific argv tokens that the
+    CALLER has explicitly opted into (e.g., ``--permission-mode=acceptEdits``
+    for the permission-relay retry path). These bypass the denylist for
+    THIS call only. ``--dangerously-skip-permissions``,
+    ``--bypass-permissions``, and ``--permission-mode=bypassPermissions``
+    are NEVER permitted as overrides — they disable Claude Code's safety
+    surface entirely.
     """
     # Bare flag names (no `=value`) that we also want to refuse in the
     # `--flag=value` form. Derived once from ARGV_DENYLIST.
     _bare = {tok for tok in ARGV_DENYLIST if "=" not in tok}
+    overrides = allow_overrides or frozenset()
+    # Floor: no caller, no override, ever permits these. They disable
+    # Claude Code's own permission system entirely (not just one file).
+    _PERMANENTLY_REFUSED = frozenset({
+        "--dangerously-skip-permissions",
+        "--bypass-permissions",
+        "--no-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--permission-mode=bypassPermissions",
+    })
     for tok in argv:
         if not isinstance(tok, str):
             raise RunnerConfigError(f"non-string argv element: {tok!r}")
-        if tok in ARGV_DENYLIST:
+        if tok in _PERMANENTLY_REFUSED:
+            raise RunnerConfigError(
+                f"refusing argv with permanently-denied token: {tok!r}"
+            )
+        if tok in ARGV_DENYLIST and tok not in overrides:
             raise RunnerConfigError(f"refusing argv with denylisted token: {tok!r}")
         for bad in _bare:
-            if tok.startswith(bad + "="):
+            if bad in _PERMANENTLY_REFUSED and tok.startswith(bad + "="):
+                raise RunnerConfigError(
+                    f"refusing argv with permanently-denied flag form: {tok!r}"
+                )
+            if tok.startswith(bad + "=") and tok not in overrides:
                 raise RunnerConfigError(f"refusing argv with denylisted flag form: {tok!r}")
 
 
@@ -441,6 +476,7 @@ def run_claude(
     claude_bin: str = DEFAULT_CLAUDE_BIN,
     resume_session_id: Optional[str] = None,
     extra_context: str = "",
+    permission_relay_retry: bool = False,
 ) -> ClaudeResult:
     """Invoke ``claude -p`` once with a TrustPreset-driven invocation.
 
@@ -584,13 +620,25 @@ def run_claude(
             # is STILL gated by --disallowed-tools above; the resumed
             # session's prior tool uses don't grant new authority.
             argv += ["--resume", resume_session_id]
+        # Permission-relay retry path: the user has explicitly approved a
+        # blocked edit via iMessage confirmation. Pass
+        # ``--permission-mode=acceptEdits`` so claude no longer prompts
+        # for edit permission on this single retry call. Scope is files
+        # only — Bash/WebFetch/etc. still subject to default-mode
+        # rejection in -p mode. ``_assert_safe_argv`` is told to allow
+        # this specific token via ``allow_overrides``; ``bypassPermissions``
+        # remains permanently refused regardless of opt-in.
+        argv_overrides: Optional[frozenset] = None
+        if permission_relay_retry:
+            argv.append("--permission-mode=acceptEdits")
+            argv_overrides = frozenset({"--permission-mode=acceptEdits"})
         argv += [
             # ``--`` is REQUIRED: prevents a prompt that begins with ``--``
             # from being reparsed as additional flags.
             "--",
             prompt,
         ]
-        _assert_safe_argv(argv)
+        _assert_safe_argv(argv, allow_overrides=argv_overrides)
 
         logger.info(
             "claude -p (preset=%s, cwd=%s, allow=%r, disallow_count=%d, "
@@ -716,12 +764,20 @@ def run_claude(
         except (TypeError, ValueError):
             cost_usd = 0.0
 
+        # Extract permission_denials so the daemon can surface them for
+        # interactive approval. Claude reports this even on success when
+        # the model attempted (and was denied) tool calls — the model
+        # continues anyway and summarizes the partial outcome.
+        denials_raw = parsed.get("permission_denials")
+        permission_denials = denials_raw if isinstance(denials_raw, list) else []
+
         return ClaudeResult(
             success=True,
             reply=reply,
             session_id=session_id_for_cleanup,
             cost_usd=cost_usd,
             duration_ms=duration,
+            permission_denials=permission_denials,
         )
     finally:
         # Cleanup only fires when this was a hermetic-tempdir call.

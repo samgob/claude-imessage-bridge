@@ -225,6 +225,112 @@ def _user_facing_error(category: Optional[str]) -> str:
     return "⚠️ Reply unavailable. Check daemon logs."
 
 
+def _run_permission_relay_retry(
+    *,
+    norm: str,
+    redacted: str,
+    chatdb_rowid: int,
+    session_id: str,
+    cfg,
+    active_preset,
+) -> None:
+    """User approved a permission-relay request. Re-invoke claude with
+    ``--permission-mode=acceptEdits`` and ``--resume <sid>`` so the
+    previously-blocked edits can apply. A short follow-up prompt nudges
+    the model to retry the action it was blocked on rather than starting
+    over.
+
+    Cost: a second claude call. Logged separately in audit.
+    """
+    if not session_id:
+        # Defensive — pending intent had no session id. Tell the user.
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(
+                    handle=norm,
+                    body="⚠️ Permission relay state is incomplete. Try the original request again.",
+                ),
+            )
+        except imessage_sender.SendError:
+            pass
+        return
+
+    retry_prompt = (
+        "I've approved the permission request you flagged. "
+        "Please proceed with the action(s) you were blocked on, "
+        "then summarize what changed."
+    )
+    logger.info(
+        "permission relay retry: resume %s for %s",
+        session_id[:8], redacted,
+    )
+    try:
+        result = claude_runner.run_claude(
+            retry_prompt,
+            trust_preset=active_preset,
+            project_directory=cfg.project_directory,
+            allowed_tools_addons=cfg.allowed_tools,
+            timeout_seconds=cfg.per_call_timeout_seconds,
+            claude_bin=cfg.claude_binary,
+            resume_session_id=session_id,
+            extra_context="",
+            permission_relay_retry=True,
+        )
+    except claude_runner.RunnerConfigError as e:
+        logger.error("permission relay retry runner config error: %s", e)
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(
+                    handle=norm,
+                    body="⚠️ Couldn't run the retry. Check daemon logs.",
+                ),
+            )
+        except imessage_sender.SendError:
+            pass
+        return
+
+    cents = max(0, int(result.cost_usd * 100 + 0.999))
+    if cents:
+        state.add_cost_cents(cents)
+
+    if result.success:
+        if result.session_id:
+            state.set_current_session(norm, result.session_id)
+        reply_body = result.reply.strip() or "(claude returned an empty response)"
+        detail = (
+            f"permission-relay-retry ok dur={result.duration_ms}ms "
+            f"cost_cents={cents} sid={(result.session_id or 'none')[:8]}"
+        )
+    else:
+        reply_body = _user_facing_error(result.error_category)
+        detail = (
+            f"permission-relay-retry err category={result.error_category} "
+            f"dur={result.duration_ms}ms"
+        )
+        logger.warning(
+            "permission relay retry failed handle=%s category=%s raw=%r",
+            redacted, result.error_category, result.error,
+        )
+
+    try:
+        imessage_sender.send(
+            imessage_sender.SendRequest(handle=norm, body=reply_body),
+        )
+        _record_self_send(norm, reply_body)
+        state.audit(
+            handle_redacted=redacted, direction="out", kind="reply",
+            detail=detail,
+            reply_bytes=len(reply_body.encode("utf-8")),
+            chatdb_rowid=chatdb_rowid,
+            cost_cents=cents,
+            error_category=result.error_category,
+        )
+        _metrics["permission_relay_retry"] += 1
+        _metrics["cost_cents"] += cents
+    except imessage_sender.SendError as e:
+        logger.error("permission relay retry send failed: %s", e)
+
+
 def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     """Process a single inbound message: decide, rate-limit, reply.
 
@@ -316,8 +422,28 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     pending = state.get_pending_intent(norm)
     if pending is not None:
         if intents.is_confirmation_yes(msg.body):
-            # Execute the pending command by rewriting the body and
-            # falling through to /command dispatch below.
+            # Special sentinel: permission-relay retry. Not a slash
+            # command — runs the retry path with --permission-mode=
+            # acceptEdits + --resume <session_id stored in extra_arg>.
+            if pending.get("command") == "__permission_relay__":
+                session_id_to_resume = pending.get("extra_arg") or ""
+                state.clear_pending_intent(norm)
+                _metrics["permission_relay_approved"] += 1
+                _run_permission_relay_retry(
+                    norm=norm,
+                    redacted=redacted,
+                    chatdb_rowid=msg.rowid,
+                    session_id=session_id_to_resume,
+                    cfg=cfg,
+                    active_preset=trust_mod.resolve_trust(
+                        trust_default=cfg.trust_default,
+                        trust_per_alias=cfg.trust_per_alias,
+                        active_alias=None,
+                    ),
+                )
+                return
+            # Normal pending intent: execute the stashed command by
+            # rewriting the body and falling through to /command dispatch.
             extra = pending.get("extra_arg", "")
             body_for_dispatch = pending["command"]
             if extra:
@@ -326,11 +452,18 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             _metrics["intent_confirmed"] += 1
         elif intents.is_confirmation_no(msg.body):
             state.clear_pending_intent(norm)
+            # For permission relay, "no" means "skip the edit". The
+            # original message's partial reply was never sent (we
+            # intercepted it). Send a brief acknowledgment.
+            cancel_reply = "Cancelled."
+            if pending.get("command") == "__permission_relay__":
+                cancel_reply = "Skipped. The edit wasn't applied."
+                _metrics["permission_relay_declined"] += 1
             try:
                 imessage_sender.send(
-                    imessage_sender.SendRequest(handle=norm, body="Cancelled."),
+                    imessage_sender.SendRequest(handle=norm, body=cancel_reply),
                 )
-                _record_self_send(norm, "Cancelled.")
+                _record_self_send(norm, cancel_reply)
                 state.audit(
                     handle_redacted=redacted, direction="out", kind="reply",
                     detail="intent-cancelled",
@@ -641,6 +774,81 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             _record_self_send(norm, per_call_cap_body)
         except imessage_sender.SendError:
             pass
+        return
+
+    # Permission relay: claude reports permission_denials on a successful
+    # call when the model tried (and was blocked from) sensitive-file
+    # edits. The model continues, summarizes the partial outcome, and the
+    # call exits 0. We intercept here: instead of sending the partial
+    # reply, ask the user to approve the blocked operations. On yes, we
+    # retry with --permission-mode=acceptEdits + --resume to apply.
+    #
+    # Only fires in coding/full trust modes. chat_only has no tools to
+    # be blocked, so denials would be empty anyway.
+    if (result.success
+            and result.permission_denials
+            and active_preset.name in ("coding", "full")
+            and result.session_id):
+        # Persist the session id first so the retry can resume it.
+        state.set_current_session(norm, result.session_id)
+        # Summarize the denials for the user. Each entry from claude is
+        # typically {"tool_name": "Edit", "tool_input": {"file_path":
+        # "..."}, ...} — extract the key fields without leaking the full
+        # tool_input contents (which could be large).
+        denial_lines = []
+        for d in result.permission_denials[:5]:  # cap at 5 in the prompt
+            if not isinstance(d, dict):
+                continue
+            tool = d.get("tool_name") or d.get("tool") or "?"
+            ti = d.get("tool_input") or {}
+            path = ""
+            if isinstance(ti, dict):
+                path = ti.get("file_path") or ti.get("path") or ""
+            if path:
+                # Trim to filename + immediate parent for readability
+                try:
+                    p = Path(path)
+                    relative = "~/" + str(p.relative_to(Path.home()))
+                except (ValueError, OSError):
+                    relative = path
+                denial_lines.append(f"  {tool} → {relative}")
+            else:
+                denial_lines.append(f"  {tool}")
+        extra = ""
+        if len(result.permission_denials) > 5:
+            extra = f"\n  …and {len(result.permission_denials) - 5} more"
+        paraphrase = (
+            "🔒 Claude wanted to do these but was blocked by permission "
+            "gates:\n"
+            + "\n".join(denial_lines)
+            + extra
+            + "\n\nReply 'yes' to approve and retry, or 'no' to skip "
+            "(claude's partial reply will be sent as-is)."
+        )
+        # Stash a relay-specific pending intent. The command field is a
+        # sentinel; the daemon detects it on the next inbound and runs
+        # the retry path rather than dispatching as a slash command.
+        state.set_pending_intent(
+            norm, command="__permission_relay__", extra_arg=result.session_id,
+        )
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(handle=norm, body=paraphrase),
+            )
+            _record_self_send(norm, paraphrase)
+            _metrics["permission_relay_prompted"] += 1
+            state.audit(
+                handle_redacted=redacted, direction="out", kind="reply",
+                detail=f"permission-relay-prompt count={len(result.permission_denials)}",
+                reply_bytes=len(paraphrase.encode("utf-8")),
+                chatdb_rowid=msg.rowid,
+                cost_cents=cents,
+            )
+        except imessage_sender.SendError as e:
+            logger.error("permission relay paraphrase send failed: %s", e)
+            state.clear_pending_intent(norm)
+        # Cost is still attributed to this call; the partial reply doesn't
+        # get sent. The retry (on confirmation) will add its own cost.
         return
 
     # Circuit breaker: track consecutive failures and auto-PAUSE if we
