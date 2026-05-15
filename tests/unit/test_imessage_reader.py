@@ -210,11 +210,18 @@ def test_reader_truncates_oversized_body(tmp_path: Path):
     assert msgs[0].body_truncated is True
 
 
-def test_reader_skips_empty_body(tmp_path: Path):
+def test_reader_yields_empty_body_as_skip_sentinel(tmp_path: Path):
+    """Empty-body rows are yielded with sentinel sender so the daemon's
+    cursor advances past them. Without this, the daemon would re-read
+    the same unparseable rows on every poll forever.
+    """
     db = _make_chatdb(tmp_path)
     _insert_message(db, rowid=1, handle="+15551234567", text="   ", attributed=None)
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
-    assert msgs == []
+    assert len(msgs) == 1
+    assert msgs[0].rowid == 1
+    assert msgs[0].sender_handle == "<empty-skip>"
+    assert msgs[0].body == ""
 
 
 def test_reader_falls_back_to_attributed_body(tmp_path: Path):
@@ -244,8 +251,10 @@ def test_reader_refuses_oversized_attributed_body(tmp_path: Path):
         text=None, attributed=too_big,
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
-    # No usable body — row is skipped.
-    assert msgs == []
+    # No usable body — row yielded with skip sentinel so cursor advances.
+    assert len(msgs) == 1
+    assert msgs[0].sender_handle == "<empty-skip>"
+    assert msgs[0].body == ""
 
 
 def test_reader_refuses_rich_classes_in_attributed_body(tmp_path: Path):
@@ -267,7 +276,10 @@ def test_reader_refuses_rich_classes_in_attributed_body(tmp_path: Path):
         text=None, attributed=blob,
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
-    assert msgs == []  # parser refused; row skipped
+    # Parser refused; row yielded as empty-skip so cursor advances.
+    assert len(msgs) == 1
+    assert msgs[0].sender_handle == "<empty-skip>"
+    assert msgs[0].body == ""
 
 
 def test_reader_malformed_attributed_body_does_not_crash(tmp_path: Path):
@@ -280,6 +292,24 @@ def test_reader_malformed_attributed_body_does_not_crash(tmp_path: Path):
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     assert len(msgs) == 1
     assert msgs[0].body == "visible text"
+
+
+def test_reader_unparseable_attributed_body_empty_text_yields_skip(tmp_path: Path):
+    """Regression: 2026-05-15 loop. Rows with unparseable attributedBody +
+    empty text MUST yield (as empty-skip) so the daemon advances cursor.
+    Previously the iterator silently `continue`d, causing the daemon to
+    re-read the same rows every 3s and flood the log with warnings.
+    """
+    db = _make_chatdb(tmp_path)
+    _insert_message(
+        db, rowid=1, handle="+15551234567",
+        text=None, attributed=b"\x00not a plist",
+    )
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
+    assert msgs[0].rowid == 1
+    assert msgs[0].sender_handle == "<empty-skip>"
+    assert msgs[0].body == ""
 
 
 # --- Group chat flag ---------------------------------------------------

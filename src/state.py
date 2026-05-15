@@ -396,11 +396,14 @@ def set_last_options(
 
 LAST_OPTIONS_TTL_SECONDS = 30 * 60  # 30 min — stale picks aren't honored
 
-# Pending NL-intent confirmation TTL. 60s is short on purpose: if you say
-# "kill the bridge" and then immediately drift to another conversation,
-# we want the confirmation to expire so you don't "yes" something
-# unrelated later.
-PENDING_INTENT_TTL_SECONDS = 60
+# Pending NL-intent confirmation TTL. Was 60s — too short for phone-paced
+# messaging. Live test on 2026-05-15: Sam took >60s to reply "Yes" to a
+# permission-relay prompt; pending expired; "Yes" was then processed as a
+# fresh message, claude resumed the session and asked clarifying questions
+# which iCloud echoed back as inbound, kicking off a feedback loop.
+# 15min is generous enough for "I'll come back to this after lunch" without
+# being so long that a stale confirmation leaks into an unrelated topic.
+PENDING_INTENT_TTL_SECONDS = 60 * 15
 
 
 def get_last_options(

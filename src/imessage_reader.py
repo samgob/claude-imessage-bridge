@@ -19,6 +19,15 @@ Security model (see docs/THREAT_MODEL.md S1):
 
 We do not parse attachments in v0. The attachment table is documented in
 the threat model as a future concern.
+
+Cursor-advance semantics: every SQL row returned MUST yield a Message,
+even when we have no usable body or no sender. The daemon advances the
+chat.db cursor only for rows the iterator emits — silently `continue`ing
+on a skip causes the daemon to re-read the same rows on every 3s poll
+forever (and re-emit any warnings they trigger). Rows we can't process
+are yielded with sender_handle="<empty-skip>" so the daemon's allowlist
+gate drops them as invalid-handle-format, audits the drop, and advances
+past them.
 """
 
 from __future__ import annotations
@@ -113,7 +122,12 @@ def _extract_attributed_body_text(blob: bytes) -> Optional[str]:
     try:
         archive = plistlib.loads(blob)
     except Exception as e:
-        logger.warning("attributedBody plist parse failed: %s", e)
+        # DEBUG, not WARNING. Modern macOS iMessage rows frequently carry
+        # attributedBody payloads in formats plistlib can't decode (typedstream
+        # archive, NSKeyedArchiver variants), and we always have a fallback
+        # path (text column, or yield-as-skip so the daemon advances cursor).
+        # WARNING-level here caused log floods on benign skipped rows.
+        logger.debug("attributedBody plist parse failed: %s", e)
         return None
 
     if not isinstance(archive, dict):
@@ -232,13 +246,24 @@ def fetch_new_messages(
 
     for row in rows:
         body, truncated, warning = _row_body(row)
-        # Skip rows with no body content. iMessage may have e.g. sticker
-        # rows where both text and attributedBody yield nothing useful.
-        if not body.strip():
-            continue
         sender = row["sender_handle"]
-        if not sender:
-            # Shouldn't happen for iMessage-service rows, but defensively skip.
+        # Cursor-advance-on-skip: rows with no usable body OR no sender
+        # still yield, so the daemon advances its cursor past them.
+        # Sentinel handle "<empty-skip>" fails the daemon's allowlist
+        # gate (invalid-handle-format) → audited as drop → cursor
+        # advances. Without this, the daemon would re-read these rows
+        # forever every poll, re-emitting warnings.
+        if (not body.strip()) or (not sender):
+            yield Message(
+                rowid=int(row["rowid"]),
+                chat_guid=row["chat_guid"] or "",
+                is_group=(row["chat_style"] == 43),
+                sender_handle="<empty-skip>",
+                timestamp_iso=_apple_date_to_iso(row["apple_date"]),
+                body="",
+                body_truncated=False,
+                parse_warning=warning,
+            )
             continue
         yield Message(
             rowid=int(row["rowid"]),
