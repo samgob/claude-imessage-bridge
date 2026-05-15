@@ -84,14 +84,119 @@ RECENT_SELF_SEND_CAP: int = 256  # bounded; old entries fall off
 _recent_self_sends: Deque[Tuple[float, str, str]] = deque(maxlen=RECENT_SELF_SEND_CAP)
 
 
+# Smart-quote / dash normalization table. iMessage autocorrect and link
+# autodetection rewrite some characters between the bytes we send and the
+# bytes iCloud sync-echoes back. 2026-05-15 live test: only 1 of ~14 echoes
+# matched exact-bytes hash — overnight loop ensued. Normalize before
+# hashing so the echo dedupe survives those rewrites.
+_QUOTE_NORMALIZE = str.maketrans({
+    "‘": "'", "’": "'",   # curly singles
+    "“": '"', "”": '"',   # curly doubles
+    "–": "-", "—": "-",   # en/em dash
+    " ": " ",                  # non-breaking space
+})
+
+
+def _normalize_for_dedupe(body: str) -> str:
+    """Canonicalize a body for echo-dedupe hashing.
+
+    Why each transform:
+    - Translate smart quotes / em-dashes / NBSP to ASCII equivalents
+      (iMessage autocorrect rewrites these between send and sync-back).
+    - Collapse all whitespace runs to single spaces (iMessage occasionally
+      normalizes leading/trailing whitespace and line breaks).
+    - Lowercase (case-fold idempotent on emoji; iMessage capitalizes
+      sentence starts on some devices).
+    - Strip.
+    """
+    s = body.translate(_QUOTE_NORMALIZE)
+    # Collapse hyphen runs (iMessage autocorrects "--" → "—" which the
+    # table above already maps to "-"; outbound "--" needs the same
+    # canonical form so both sides hash identically).
+    while "--" in s:
+        s = s.replace("--", "-")
+    s = " ".join(s.split())
+    return s.strip().lower()
+
+
 def _body_digest(body: str) -> str:
     """Stable short hash of an outgoing body, for echo dedupe."""
-    return hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return hashlib.sha256(
+        _normalize_for_dedupe(body).encode("utf-8", errors="replace")
+    ).hexdigest()[:16]
 
 
 def _record_self_send(handle: str, body: str) -> None:
-    """Note that the bridge just sent ``body`` to ``handle``."""
+    """Note that the bridge just sent ``body`` to ``handle``.
+
+    Also ticks the outbound-rate safety net — every send path in the
+    daemon funnels through here, so this is the single chokepoint to
+    detect a runaway-reply loop and trip PAUSE.
+    """
     _recent_self_sends.append((time.time(), handle, _body_digest(body)))
+    redacted = imessage_sender._redact_handle(handle)  # noqa: SLF001
+    _check_outbound_rate(handle, redacted)
+
+
+# --- Outbound-rate auto-PAUSE safety net ---------------------------------
+#
+# The existing per-handle reply rate-limiter caps replies at
+# cfg.reply_rate_limit_per_minute (default 10/min) by DROPPING excess
+# messages. That bounds cost but does NOT detect that we're in a loop —
+# it just keeps draining the rate-limit window forever.
+#
+# This safety net is different: if we observe a single handle receiving
+# more than OUTBOUND_PAUSE_THRESHOLD outbound sends within
+# OUTBOUND_PAUSE_WINDOW_SECONDS, we trip the PAUSE file. The daemon then
+# idles until the operator clears PAUSE. This is the right response to
+# "we're definitely in a feedback loop" — kill the whole reply pipeline,
+# don't keep generating expensive Claude calls.
+#
+# Why 6/min: typical human-paced reply burst caps at 2-3/min. Intentional
+# rapid-fire ("yes", "actually no", "yes again") stays under 5/min.
+# 6/min is the "we're in a loop" threshold. Sits below the 10/min
+# reply-rate-limit so the rate limiter still drops first; PAUSE only
+# trips if a sustained burst gets past it.
+#
+# Volatile (module-level, not state.db): this is loop-prevention, not
+# forensics. A daemon restart resets the window, which is fine — restart
+# is itself a circuit break.
+
+OUTBOUND_PAUSE_THRESHOLD: int = 6
+OUTBOUND_PAUSE_WINDOW_SECONDS: float = 60.0
+OUTBOUND_PAUSE_RING_CAP: int = 512
+_recent_outbound: Deque[Tuple[float, str]] = deque(maxlen=OUTBOUND_PAUSE_RING_CAP)
+
+
+def _check_outbound_rate(handle: str, redacted: str) -> bool:
+    """Record an outbound send and trip PAUSE if rate exceeded.
+
+    Returns True if the safety net tripped (caller should treat this as
+    a hard stop; the daemon's main loop will see PAUSE and idle).
+    """
+    now = time.time()
+    cutoff = now - OUTBOUND_PAUSE_WINDOW_SECONDS
+    _recent_outbound.append((now, handle))
+    # Prune head.
+    while _recent_outbound and _recent_outbound[0][0] < cutoff:
+        _recent_outbound.popleft()
+    count = sum(1 for _, h in _recent_outbound if h == handle)
+    if count > OUTBOUND_PAUSE_THRESHOLD:
+        logger.error(
+            "outbound-rate safety net tripped for %s: %d sends in %ds — "
+            "creating PAUSE",
+            redacted, count, int(OUTBOUND_PAUSE_WINDOW_SECONDS),
+        )
+        _metrics["outbound_rate_pause_trips"] += 1
+        try:
+            state.trip_pause(
+                reason=f"auto: outbound rate exceeded for {redacted} "
+                f"({count}/{int(OUTBOUND_PAUSE_WINDOW_SECONDS)}s)",
+            )
+        except Exception as e:  # noqa: BLE001 — log + continue; PAUSE is best-effort
+            logger.error("failed to write PAUSE file: %s", e)
+        return True
+    return False
 
 
 def _is_recent_self_send(handle: str, body: str) -> bool:

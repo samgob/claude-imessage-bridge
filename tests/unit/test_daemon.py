@@ -183,6 +183,122 @@ def test_self_send_ring_bounded():
     assert len(daemon._recent_self_sends) <= daemon.RECENT_SELF_SEND_CAP
 
 
+def test_dedupe_handles_smart_quotes():
+    """Regression: 2026-05-15 loop. iMessage autocorrect rewrites ASCII
+    quotes to curly quotes between send and iCloud sync-echo. Without
+    normalization, the echo doesn't match and we reply to our own reply.
+    """
+    daemon._recent_self_sends.clear()
+    handle = "+15551234567"
+    sent = "Yes, I'll handle the \"peptides\" log update."
+    daemon._record_self_send(handle, sent)
+    # iCloud echoed back with curly quotes / em-dash
+    echoed = "Yes, I’ll handle the “peptides” log update."
+    assert daemon._is_recent_self_send(handle, echoed)
+
+
+def test_dedupe_handles_whitespace_variation():
+    """Whitespace runs and trailing newlines must not defeat dedupe."""
+    daemon._recent_self_sends.clear()
+    handle = "+15551234567"
+    daemon._record_self_send(handle, "hello   world")
+    assert daemon._is_recent_self_send(handle, "hello world")
+    assert daemon._is_recent_self_send(handle, "hello world\n")
+    assert daemon._is_recent_self_send(handle, "  hello\tworld  ")
+
+
+def test_dedupe_handles_case_difference():
+    """Some devices capitalize sentence starts; dedupe should be case-insensitive."""
+    daemon._recent_self_sends.clear()
+    handle = "+15551234567"
+    daemon._record_self_send(handle, "okay, on it")
+    assert daemon._is_recent_self_send(handle, "Okay, on it")
+    assert daemon._is_recent_self_send(handle, "OKAY, ON IT")
+
+
+def test_dedupe_em_dash_normalized():
+    """Em-dashes (autocorrected from `--`) must not break dedupe."""
+    daemon._recent_self_sends.clear()
+    handle = "+15551234567"
+    daemon._record_self_send(handle, "running tests -- back soon")
+    assert daemon._is_recent_self_send(handle, "running tests — back soon")
+    assert daemon._is_recent_self_send(handle, "running tests – back soon")
+
+
+# --- Outbound-rate auto-PAUSE safety net --------------------------------
+
+class _PauseSpy:
+    """Drop-in replacement for state.trip_pause that records calls."""
+    def __init__(self):
+        self.calls: list = []
+    def __call__(self, *args, **kwargs):
+        self.calls.append(kwargs.get("reason", ""))
+
+
+def test_outbound_rate_pause_trips_after_threshold(monkeypatch):
+    """Regression: 2026-05-15 overnight loop. >6 outbound sends to the
+    same handle inside 60s must trip the PAUSE file, killing the reply
+    pipeline before the daily cost cap is exhausted.
+    """
+    spy = _PauseSpy()
+    monkeypatch.setattr(daemon.state, "trip_pause", spy)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    handle = "+15551234567"
+    # 6 sends — under threshold, no trip.
+    for i in range(daemon.OUTBOUND_PAUSE_THRESHOLD):
+        daemon._record_self_send(handle, f"reply {i}")
+    assert spy.calls == []
+    # 7th send — trips.
+    daemon._record_self_send(handle, "reply 7")
+    assert len(spy.calls) == 1
+    assert "outbound rate exceeded" in spy.calls[0]
+
+
+def test_outbound_rate_per_handle_isolated(monkeypatch):
+    """Bursts to different handles should not aggregate."""
+    spy = _PauseSpy()
+    monkeypatch.setattr(daemon.state, "trip_pause", spy)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    # Alternate handles, 5 each — neither crosses threshold alone.
+    for i in range(5):
+        daemon._record_self_send("+15551111111", f"a{i}")
+        daemon._record_self_send("+15552222222", f"b{i}")
+    assert spy.calls == []
+
+
+def test_outbound_rate_window_slides(monkeypatch):
+    """Old sends outside the window are pruned and shouldn't count."""
+    import time as _time
+    spy = _PauseSpy()
+    monkeypatch.setattr(daemon.state, "trip_pause", spy)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    handle = "+15551234567"
+    # Backdate 6 sends so they fall outside the window.
+    old_t = _time.time() - daemon.OUTBOUND_PAUSE_WINDOW_SECONDS - 5
+    for i in range(6):
+        daemon._recent_outbound.append((old_t, handle))
+    # A fresh send: only 1 in-window, no trip.
+    daemon._record_self_send(handle, "fresh")
+    assert spy.calls == []
+
+
+def test_outbound_rate_does_not_leak_raw_handle(monkeypatch):
+    """The PAUSE reason must use a redacted handle, not the raw phone
+    number (the PAUSE file persists on disk and shouldn't reveal PII)."""
+    spy = _PauseSpy()
+    monkeypatch.setattr(daemon.state, "trip_pause", spy)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    handle = "+15551234567"
+    for i in range(daemon.OUTBOUND_PAUSE_THRESHOLD + 1):
+        daemon._record_self_send(handle, f"reply {i}")
+    assert len(spy.calls) >= 1
+    assert handle not in spy.calls[0]  # raw handle must not appear
+
+
 def test_audit_failure_detail_string_redacted():
     """The audit detail string for a claude failure MUST NOT contain the
     raw error string or the consecutive-failure count.
