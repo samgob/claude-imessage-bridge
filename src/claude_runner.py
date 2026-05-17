@@ -477,6 +477,8 @@ def run_claude(
     resume_session_id: Optional[str] = None,
     extra_context: str = "",
     permission_relay_retry: bool = False,
+    accept_edits: bool = False,
+    protected_files: Optional[list[str]] = None,
 ) -> ClaudeResult:
     """Invoke ``claude -p`` once with a TrustPreset-driven invocation.
 
@@ -620,18 +622,43 @@ def run_claude(
             # is STILL gated by --disallowed-tools above; the resumed
             # session's prior tool uses don't grant new authority.
             argv += ["--resume", resume_session_id]
-        # Permission-relay retry path: the user has explicitly approved a
-        # blocked edit via iMessage confirmation. Pass
-        # ``--permission-mode=acceptEdits`` so claude no longer prompts
-        # for edit permission on this single retry call. Scope is files
-        # only — Bash/WebFetch/etc. still subject to default-mode
-        # rejection in -p mode. ``_assert_safe_argv`` is told to allow
-        # this specific token via ``allow_overrides``; ``bypassPermissions``
-        # remains permanently refused regardless of opt-in.
+        # --permission-mode=acceptEdits is appended when:
+        # (a) accept_edits=True — the daemon's default for trust=full,
+        #     so routine edits to non-protected files (e.g. memory
+        #     files like Personal/Health/health-log.md) go through
+        #     without a permission relay round-trip;
+        # (b) permission_relay_retry=True — user explicitly approved a
+        #     previously-denied edit; this retry must auto-accept.
+        # In case (a), protected_files (if any) are listed as
+        # permissions.deny rules in an inline --settings JSON, so edits
+        # to those specific paths still trigger a permission_denial and
+        # route to the existing relay flow. In case (b), the deny rules
+        # are OMITTED so the approved edit actually applies.
+        # _assert_safe_argv is told to allow --permission-mode=acceptEdits
+        # via allow_overrides; bypassPermissions stays permanently refused.
         argv_overrides: Optional[frozenset] = None
-        if permission_relay_retry:
+        if accept_edits or permission_relay_retry:
             argv.append("--permission-mode=acceptEdits")
             argv_overrides = frozenset({"--permission-mode=acceptEdits"})
+        if (
+            accept_edits
+            and not permission_relay_retry
+            and protected_files
+        ):
+            deny_rules: list[str] = []
+            for raw_path in protected_files:
+                # Expand ~ so a config entry like "~/.claude/CLAUDE.md"
+                # resolves to the real path Edit would see. Without
+                # expansion the deny rule never matches.
+                expanded = str(Path(raw_path).expanduser())
+                deny_rules.append(f"Edit({expanded})")
+                deny_rules.append(f"Write({expanded})")
+                deny_rules.append(f"MultiEdit({expanded})")
+            settings_json = json.dumps(
+                {"permissions": {"deny": deny_rules}},
+                separators=(",", ":"),
+            )
+            argv += ["--settings", settings_json]
         argv += [
             # ``--`` is REQUIRED: prevents a prompt that begins with ``--``
             # from being reparsed as additional flags.

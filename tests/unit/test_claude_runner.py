@@ -542,6 +542,110 @@ def test_run_claude_assert_safe_argv_with_acceptEdits_override():
     )  # must not raise
 
 
+def test_run_claude_accept_edits_passes_acceptEdits_flag(monkeypatch, fake_claude_binary):
+    """accept_edits=True is the default-mode equivalent of permission_relay_retry:
+    routine edits go through without round-tripping to the user for approval."""
+    holder = {}
+
+    def fake_popen(argv, **kwargs):
+        holder["argv"] = list(argv)
+        return _FakeProc({"result": "done", "session_id": "x", "total_cost_usd": 0.0})
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
+    claude_runner.run_claude(
+        "edit the health log",
+        trust_preset=trust.PRESET_FULL,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+        accept_edits=True,
+    )
+    assert "--permission-mode=acceptEdits" in holder["argv"]
+
+
+def test_run_claude_accept_edits_with_protected_files_emits_deny_settings(
+    monkeypatch, fake_claude_binary
+):
+    """protected_files becomes permissions.deny rules in inline --settings JSON.
+    CLAUDE.md edits should require explicit approval (relay flow) even though
+    everything else is acceptEdits-auto-accepted."""
+    import json
+    holder = {}
+
+    def fake_popen(argv, **kwargs):
+        holder["argv"] = list(argv)
+        return _FakeProc({"result": "done", "session_id": "x", "total_cost_usd": 0.0})
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
+    claude_runner.run_claude(
+        "edit something",
+        trust_preset=trust.PRESET_FULL,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+        accept_edits=True,
+        protected_files=["~/.claude/CLAUDE.md"],
+    )
+    argv = holder["argv"]
+    assert "--settings" in argv
+    settings_json = argv[argv.index("--settings") + 1]
+    parsed = json.loads(settings_json)
+    deny = parsed["permissions"]["deny"]
+    expanded = str(Path("~/.claude/CLAUDE.md").expanduser())
+    assert f"Edit({expanded})" in deny
+    assert f"Write({expanded})" in deny
+    assert f"MultiEdit({expanded})" in deny
+
+
+def test_run_claude_relay_retry_omits_deny_rules(monkeypatch, fake_claude_binary):
+    """On the permission-relay retry path the user has already approved the
+    edit — the deny rules must NOT be passed, otherwise the approved edit
+    would still be blocked."""
+    holder = {}
+
+    def fake_popen(argv, **kwargs):
+        holder["argv"] = list(argv)
+        return _FakeProc({"result": "applied", "session_id": "x", "total_cost_usd": 0.0})
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
+    claude_runner.run_claude(
+        "please proceed",
+        trust_preset=trust.PRESET_FULL,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+        permission_relay_retry=True,
+        # Caller (daemon) might still pass these, but retry must drop them:
+        accept_edits=True,
+        protected_files=["~/.claude/CLAUDE.md"],
+    )
+    argv = holder["argv"]
+    assert "--permission-mode=acceptEdits" in argv
+    # No --settings JSON on the retry path — the approved edit must apply.
+    assert "--settings" not in argv
+
+
+def test_run_claude_no_accept_edits_default(monkeypatch, fake_claude_binary):
+    """Without accept_edits=True, no --permission-mode=acceptEdits in argv —
+    backward compat for chat_only/coding test scenarios that don't pass it."""
+    holder = {}
+
+    def fake_popen(argv, **kwargs):
+        holder["argv"] = list(argv)
+        return _FakeProc({"result": "ok", "session_id": "x", "total_cost_usd": 0.0})
+
+    monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
+    claude_runner.run_claude(
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
+    )
+    assert "--permission-mode=acceptEdits" not in holder["argv"]
+    assert "--settings" not in holder["argv"]
+
+
 def test_run_claude_bypassPermissions_never_allowed_even_with_override():
     """--permission-mode=bypassPermissions is permanently refused.
     Even an explicit override doesn't unlock it — it disables Claude

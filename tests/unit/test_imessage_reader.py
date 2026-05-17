@@ -50,6 +50,15 @@ CREATE TABLE chat_message_join (
     chat_id INTEGER,
     message_id INTEGER
 );
+CREATE TABLE attachment (
+    ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT,
+    mime_type TEXT
+);
+CREATE TABLE message_attachment_join (
+    message_id INTEGER,
+    attachment_id INTEGER
+);
 """
 
 
@@ -118,6 +127,29 @@ def _insert_message(
             (c_rowid, rowid),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_attachment(
+    db: Path, *, message_rowid: int, filename: str, mime_type: str = "image/jpeg",
+) -> int:
+    """Insert an attachment row and join it to ``message_rowid``. Returns
+    the new attachment ROWID."""
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO attachment (filename, mime_type) VALUES (?, ?)",
+            (filename, mime_type),
+        )
+        attach_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO message_attachment_join "
+            "(message_id, attachment_id) VALUES (?, ?)",
+            (message_rowid, attach_id),
+        )
+        conn.commit()
+        return attach_id
     finally:
         conn.close()
 
@@ -395,3 +427,107 @@ def test_latest_rowid_empty_db(tmp_path: Path):
 
 def test_latest_rowid_missing_db(tmp_path: Path):
     assert imessage_reader.latest_rowid(chatdb=tmp_path / "nope.db") == 0
+
+
+# --- Attachment path resolution ----------------------------------------
+
+def test_attachment_path_surfaced_when_file_exists(tmp_path: Path, monkeypatch):
+    """Image rows should surface the on-disk file path so the daemon can
+    hand it to claude (so claude can Read it). Apple stores attachments
+    under ~/Library/Messages/Attachments/...; we point _ATTACHMENT_ROOT
+    at a tmp dir for the test."""
+    db = _make_chatdb(tmp_path)
+    fake_root = tmp_path / "Attachments"
+    fake_root.mkdir()
+    img = fake_root / "ab/12"
+    img.mkdir(parents=True)
+    img_path = img / "IMG_0001.jpeg"
+    img_path.write_bytes(b"\xff\xd8\xff\xe0fakejpg")
+    monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
+
+    _insert_message(
+        db, rowid=1, handle="+15551234567", text="￼",
+        cache_has_attachments=1,
+    )
+    _insert_attachment(db, message_rowid=1, filename=str(img_path))
+
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
+    assert msgs[0].has_attachment is True
+    assert msgs[0].attachment_paths == (str(img_path),)
+
+
+def test_attachment_path_outside_root_rejected(tmp_path: Path, monkeypatch):
+    """Path-traversal defense: a chat.db filename that resolves outside
+    the attachment root is dropped (defense in depth; chat.db is
+    user-writable so a malicious row could in theory craft this)."""
+    db = _make_chatdb(tmp_path)
+    fake_root = tmp_path / "Attachments"
+    fake_root.mkdir()
+    monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
+
+    # Create a file OUTSIDE the attachment root.
+    bad = tmp_path / "elsewhere.jpeg"
+    bad.write_bytes(b"x")
+
+    _insert_message(
+        db, rowid=1, handle="+15551234567", text="￼",
+        cache_has_attachments=1,
+    )
+    _insert_attachment(db, message_rowid=1, filename=str(bad))
+
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
+    assert msgs[0].attachment_paths == ()  # rejected
+
+
+def test_attachment_path_missing_file_dropped(tmp_path: Path, monkeypatch):
+    """If chat.db references a path but the file doesn't exist yet (e.g.
+    iCloud download still in flight), drop the entry rather than feed
+    claude a stale path."""
+    db = _make_chatdb(tmp_path)
+    fake_root = tmp_path / "Attachments"
+    fake_root.mkdir()
+    monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
+
+    _insert_message(
+        db, rowid=1, handle="+15551234567", text="￼",
+        cache_has_attachments=1,
+    )
+    _insert_attachment(
+        db, message_rowid=1, filename=str(fake_root / "ghost.jpeg"),
+    )
+
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
+    assert msgs[0].attachment_paths == ()
+
+
+def test_attachment_path_count_capped(tmp_path: Path, monkeypatch):
+    """We only surface up to MAX_ATTACHMENTS_PER_MESSAGE paths per message."""
+    db = _make_chatdb(tmp_path)
+    fake_root = tmp_path / "Attachments"
+    fake_root.mkdir()
+    monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
+
+    _insert_message(
+        db, rowid=1, handle="+15551234567", text="￼",
+        cache_has_attachments=1,
+    )
+    # Insert more than the cap
+    over_cap = imessage_reader.MAX_ATTACHMENTS_PER_MESSAGE + 3
+    for i in range(over_cap):
+        p = fake_root / f"img_{i}.jpeg"
+        p.write_bytes(b"x")
+        _insert_attachment(db, message_rowid=1, filename=str(p))
+
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
+    assert len(msgs[0].attachment_paths) == imessage_reader.MAX_ATTACHMENTS_PER_MESSAGE
+
+
+def test_text_only_message_has_empty_attachment_paths(tmp_path: Path):
+    db = _make_chatdb(tmp_path)
+    _insert_message(db, rowid=1, handle="+15551234567", text="hello")
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert msgs[0].attachment_paths == ()

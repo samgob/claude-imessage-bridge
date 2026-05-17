@@ -55,6 +55,17 @@ MAX_BODY_BYTES: Final = 16 * 1024
 # malicious row can consume.
 MAX_ATTRIBUTED_BODY_BYTES: Final = 256 * 1024
 
+# Max attachments per message we'll surface. Bounds prompt growth and
+# protects against pathological group-shared albums.
+MAX_ATTACHMENTS_PER_MESSAGE: Final = 5
+
+# Allowed root for attachment paths. Apple stores all iMessage attachments
+# under this prefix; any "filename" in chat.db that resolves outside this
+# tree is rejected as a path-traversal attempt (defense in depth — a
+# write-cap'd chat.db field shouldn't be attacker-controllable, but the
+# cost of the check is one stat).
+_ATTACHMENT_ROOT: Final = Path.home() / "Library" / "Messages" / "Attachments"
+
 # Apple's "Mac absolute time" epoch: 2001-01-01 00:00:00 UTC.
 # message.date is nanoseconds since this epoch (modern macOS) OR seconds
 # (very old rows). We disambiguate by magnitude.
@@ -91,6 +102,10 @@ class Message:
     body_truncated: bool      # True if body was longer than the cap
     parse_warning: Optional[str] = None  # set when attributedBody parse failed
     has_attachment: bool = False  # row had cache_has_attachments=1 in chat.db
+    # Local filesystem paths of attachment files. Vetted by
+    # _resolve_attachment_paths to live under ~/Library/Messages/Attachments/.
+    # Capped by MAX_ATTACHMENTS_PER_MESSAGE; non-existent files are dropped.
+    attachment_paths: tuple = ()  # tuple[str, ...] — frozen dataclass
 
 
 def _extract_attributed_body_text(blob: bytes) -> Optional[str]:
@@ -173,6 +188,50 @@ def _extract_attributed_body_text(blob: bytes) -> Optional[str]:
     return None
 
 
+def _resolve_attachment_paths(
+    conn: sqlite3.Connection, message_rowid: int,
+) -> tuple:
+    """Look up attachment file paths for ``message_rowid``.
+
+    Returns a tuple of absolute path strings, capped at
+    MAX_ATTACHMENTS_PER_MESSAGE. Paths that don't resolve under
+    _ATTACHMENT_ROOT, or that don't exist on disk, are dropped.
+    """
+    rows = conn.execute(
+        "SELECT a.filename "
+        "FROM attachment AS a "
+        "JOIN message_attachment_join AS maj "
+        "  ON maj.attachment_id = a.ROWID "
+        "WHERE maj.message_id = ? "
+        "ORDER BY a.ROWID ASC "
+        "LIMIT ?",
+        (message_rowid, MAX_ATTACHMENTS_PER_MESSAGE),
+    ).fetchall()
+    out: list = []
+    for r in rows:
+        filename = r["filename"]
+        if not isinstance(filename, str) or not filename:
+            continue
+        try:
+            p = Path(filename).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        # Defense in depth: must resolve under Apple's attachment root.
+        try:
+            p.relative_to(_ATTACHMENT_ROOT.resolve())
+        except ValueError:
+            logger.debug(
+                "attachment path %r outside %s — dropping",
+                filename, _ATTACHMENT_ROOT,
+            )
+            continue
+        if not p.is_file():
+            logger.debug("attachment file missing at %s — dropping", p)
+            continue
+        out.append(str(p))
+    return tuple(out)
+
+
 def _connect(chatdb: Path) -> sqlite3.Connection:
     """Open chat.db read-only without the immutable flag.
 
@@ -252,45 +311,57 @@ def fetch_new_messages(
     with _connect(chatdb) as conn:
         rows = conn.execute(_FETCH_SQL, (last_rowid, limit)).fetchall()
 
-    for row in rows:
-        body, truncated, warning = _row_body(row)
-        sender = row["sender_handle"]
-        has_attachment = bool(row["has_attachment"])
-        # Image/attachment caption text in chat.db is wrapped around U+FFFC
-        # (OBJECT REPLACEMENT). Strip those so a real caption survives and
-        # an image-only message becomes an empty body (which routes to the
-        # daemon's polite "images aren't supported yet" ack path).
-        if has_attachment and body:
-            body = body.replace("￼", "").strip()
-        # Cursor-advance-on-skip: rows with no usable body AND no
-        # attachment OR no sender still yield as empty-skip so the
-        # cursor advances. An image-only row (attachment + empty body)
-        # is intentionally surfaced with a real sender handle below so
-        # the daemon can ack it.
-        if (not sender) or ((not body.strip()) and not has_attachment):
+        for row in rows:
+            body, truncated, warning = _row_body(row)
+            sender = row["sender_handle"]
+            has_attachment = bool(row["has_attachment"])
+            # Image/attachment caption text in chat.db is wrapped around
+            # U+FFFC (OBJECT REPLACEMENT). Strip those so a real caption
+            # survives and an image-only message becomes an empty body.
+            if has_attachment and body:
+                body = body.replace("￼", "").strip()
+            # Resolve attachment file paths (vetted against ATTACHMENT_ROOT
+            # and existence-checked). Empty tuple if none survive.
+            attachment_paths: tuple = ()
+            if has_attachment:
+                attachment_paths = _resolve_attachment_paths(
+                    conn, int(row["rowid"]),
+                )
+            # Cursor-advance-on-skip: rows yield as empty-skip ONLY
+            # when there's nothing the daemon could possibly respond to:
+            # no sender, OR (no body AND no attachment marker). When
+            # has_attachment=True we ALWAYS surface with the real sender
+            # so the daemon can send a "no-path / try again" reply even
+            # if attachment path resolution failed (iCloud download
+            # race, missing file, etc.).
+            if (not sender) or (
+                (not body.strip()) and not has_attachment
+            ):
+                yield Message(
+                    rowid=int(row["rowid"]),
+                    chat_guid=row["chat_guid"] or "",
+                    is_group=(row["chat_style"] == 43),
+                    sender_handle="<empty-skip>",
+                    timestamp_iso=_apple_date_to_iso(row["apple_date"]),
+                    body="",
+                    body_truncated=False,
+                    parse_warning=warning,
+                    has_attachment=has_attachment,
+                    attachment_paths=(),
+                )
+                continue
             yield Message(
                 rowid=int(row["rowid"]),
                 chat_guid=row["chat_guid"] or "",
-                is_group=(row["chat_style"] == 43),
-                sender_handle="<empty-skip>",
+                is_group=(row["chat_style"] == 43),  # 43 group, 45 1:1
+                sender_handle=str(sender),
                 timestamp_iso=_apple_date_to_iso(row["apple_date"]),
-                body="",
-                body_truncated=False,
+                body=body,
+                body_truncated=truncated,
                 parse_warning=warning,
                 has_attachment=has_attachment,
+                attachment_paths=attachment_paths,
             )
-            continue
-        yield Message(
-            rowid=int(row["rowid"]),
-            chat_guid=row["chat_guid"] or "",
-            is_group=(row["chat_style"] == 43),  # 43 = group, 45 = 1:1 in chat.db
-            sender_handle=str(sender),
-            timestamp_iso=_apple_date_to_iso(row["apple_date"]),
-            body=body,
-            body_truncated=truncated,
-            parse_warning=warning,
-            has_attachment=has_attachment,
-        )
 
 
 def _row_body(row: sqlite3.Row) -> tuple[str, bool, Optional[str]]:

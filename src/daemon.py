@@ -513,40 +513,78 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         )
         return
 
-    # Image / attachment handling. v0 cannot parse attachments (threat
-    # model S1 — attachment table is documented as a future concern).
-    # Before this fix, attachment-bearing rows were dropped at the SQL
-    # layer, so sending an image produced ZERO response — bad UX (Sam
-    # reported 2026-05-17). Now:
-    #   - Image-only (no caption): polite ack, no claude call.
-    #   - Image + caption: process the caption as a normal text body.
-    #     Claude doesn't see the image, but the caption usually carries
-    #     enough intent that a sensible response is possible. The user
-    #     gets actual functionality instead of silence.
-    if msg.has_attachment and not msg.body.strip():
-        ack_body = (
-            "📎 I see an attachment, but I can't process images or files "
-            "yet. Send me a text message describing what you need."
+    # Image / attachment handling. We surface attachment paths to claude
+    # in the prompt so it can use the Read tool to view them — Read
+    # supports image files (jpeg/png/heic/gif/webp/pdf) and shows the
+    # image content to the model, the same path Claude Code uses for
+    # any local image. Requires Read in allowed_tools (trust=full has
+    # it by default via the user's config).
+    #
+    # The augmentation is injected only at this layer; nothing about
+    # msg itself is mutated. If no paths resolved (e.g. file was
+    # purged before we got to it), we still bail with a short note so
+    # the user doesn't get silence.
+    if msg.has_attachment:
+        if not msg.attachment_paths:
+            no_path_body = (
+                "📎 I see you sent an attachment but the file isn't "
+                "available yet. Try resending in a moment."
+            )
+            try:
+                imessage_sender.send(
+                    imessage_sender.SendRequest(handle=norm, body=no_path_body),
+                    dry_run=False,
+                )
+                _record_self_send(norm, no_path_body)
+                _metrics["attachment_no_path"] += 1
+                state.audit(
+                    handle_redacted=redacted, direction="out", kind="ack",
+                    detail="attachment-no-path",
+                    reply_bytes=len(no_path_body.encode("utf-8")),
+                    chatdb_rowid=msg.rowid,
+                )
+            except imessage_sender.SendError as e:
+                _metrics["send_errors"] += 1
+                logger.error("attachment-no-path send failed: %s", e)
+            return
+        # Build an augmented prompt. The caption (if any) becomes the
+        # user-intent text; the paths become an instruction block for
+        # claude. Claude is told explicitly that the paths point to
+        # files the user just sent — that's important context, the
+        # paths are not the user's words. We rebuild msg.body for the
+        # downstream pipeline; the original (caption-only) is in the
+        # audit log via chatdb_rowid.
+        path_list = "\n".join(f"  - {p}" for p in msg.attachment_paths)
+        caption = msg.body.strip()
+        if caption:
+            augmented = (
+                "The user sent the following message with attached file(s).\n"
+                "Use the Read tool to view each file before replying.\n"
+                "Files:\n" + path_list + "\n\n"
+                "User's message:\n" + caption
+            )
+        else:
+            augmented = (
+                "The user sent the following file(s) with no caption.\n"
+                "Use the Read tool to view each file, then respond with "
+                "a brief description of what you see or ask what they'd "
+                "like you to do with it.\n"
+                "Files:\n" + path_list
+            )
+        # Replace msg.body for the downstream claude-invoke path. dataclasses
+        # are frozen, so build a new Message with the augmented body.
+        msg = imessage_reader.Message(
+            rowid=msg.rowid,
+            chat_guid=msg.chat_guid,
+            is_group=msg.is_group,
+            sender_handle=msg.sender_handle,
+            timestamp_iso=msg.timestamp_iso,
+            body=augmented,
+            body_truncated=msg.body_truncated,
+            parse_warning=msg.parse_warning,
+            has_attachment=True,
+            attachment_paths=msg.attachment_paths,
         )
-        try:
-            imessage_sender.send(
-                imessage_sender.SendRequest(handle=norm, body=ack_body),
-                dry_run=False,
-            )
-            _record_self_send(norm, ack_body)
-            _metrics["attachment_acks"] += 1
-            state.audit(
-                handle_redacted=redacted,
-                direction="out",
-                kind="ack",
-                detail="attachment-only",
-                reply_bytes=len(ack_body.encode("utf-8")),
-                chatdb_rowid=msg.rowid,
-            )
-        except imessage_sender.SendError as e:
-            _metrics["send_errors"] += 1
-            logger.error("attachment-ack send failed: %s", e)
-        return
 
     # --- Natural-language intent + confirmation flow ------------------
     #
@@ -832,6 +870,14 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         extra_context = ""
         _last_memory_sources = []
 
+    # Auto-accept edits in coding/full modes so routine writes (memory
+    # files, project notes, health log) don't trigger a permission relay
+    # round-trip. The protected_files list (typically just ~/.claude/CLAUDE.md)
+    # is enforced via permissions.deny in --settings, so edits to those
+    # specific paths still surface for explicit user approval.
+    use_accept_edits = active_preset.name in ("coding", "full")
+    protected_files = list(cfg.protected_files) if use_accept_edits else None
+
     try:
         result = claude_runner.run_claude(
             msg.body,
@@ -842,6 +888,8 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             claude_bin=cfg.claude_binary,
             resume_session_id=resume_id,
             extra_context=extra_context,
+            accept_edits=use_accept_edits,
+            protected_files=protected_files,
         )
 
         # Post-failure recovery for stale-session resume. claude_runner
@@ -867,6 +915,8 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
                 claude_bin=cfg.claude_binary,
                 resume_session_id=None,  # fresh
                 extra_context=extra_context,
+                accept_edits=use_accept_edits,
+                protected_files=protected_files,
             )
     except claude_runner.RunnerConfigError as e:
         logger.error("runner config error: %s", e)

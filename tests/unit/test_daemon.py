@@ -19,6 +19,7 @@ from src import daemon, imessage_reader
 
 def _msg(handle: str, *, body: str = "hi", is_group: bool = False,
          chat_guid: str = "1:1", has_attachment: bool = False,
+         attachment_paths: tuple = (),
          ) -> imessage_reader.Message:
     return imessage_reader.Message(
         rowid=1,
@@ -29,6 +30,7 @@ def _msg(handle: str, *, body: str = "hi", is_group: bool = False,
         body=body,
         body_truncated=False,
         has_attachment=has_attachment,
+        attachment_paths=attachment_paths,
     )
 
 
@@ -39,6 +41,18 @@ def _cfg(*, allowlist=("+15551234567",), groups=()) -> SimpleNamespace:
         allow_group_chat_guids=list(groups),
         debug=False,
         reply_rate_limit_per_minute=10,
+        # Fields exercised by the deeper _handle_one paths (image tests):
+        daily_cost_cap_usd=5.0,
+        per_call_cost_cap_usd=1.0,
+        per_call_timeout_seconds=90,
+        per_call_max_turns=10,
+        circuit_breaker_failures=5,
+        trust_default="full",
+        trust_per_alias={},
+        project_directory="/tmp/proj",
+        allowed_tools=["Read", "Grep", "Glob", "LS"],
+        claude_binary="/usr/local/bin/claude",
+        protected_files=["~/.claude/CLAUDE.md"],
     )
 
 
@@ -434,7 +448,7 @@ def test_daemon_main_loop_no_longer_top_level_pause_check():
     )
 
 
-# --- Image / attachment ack path ---------------------------------------
+# --- Image / attachment handling ---------------------------------------
 
 class _SendSpy:
     def __init__(self):
@@ -442,6 +456,21 @@ class _SendSpy:
 
     def __call__(self, request, *, dry_run=False):
         self.sent.append((request.handle, request.body, dry_run))
+
+
+class _RunClaudeSpy:
+    """Captures the prompt run_claude was called with, returns a stub result."""
+    def __init__(self):
+        self.calls: list = []
+
+    def __call__(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        # Minimal ClaudeResult-compatible stub
+        from src.claude_runner import ClaudeResult
+        return ClaudeResult(
+            success=True, reply="ok", session_id="sid-abc", cost_usd=0.0,
+            duration_ms=10, error=None, error_category=None,
+        )
 
 
 def _stub_state_for_handle_one(monkeypatch):
@@ -456,63 +485,102 @@ def _stub_state_for_handle_one(monkeypatch):
     monkeypatch.setattr(daemon.state, "trip_pause", lambda **_: None)
 
 
-def test_image_only_message_gets_polite_ack(monkeypatch):
-    """Regression: 2026-05-17 — Sam reported no response when sending
-    images. Image-only rows now reach the daemon (instead of being
-    dropped at SQL) and produce a polite ack instead of silence."""
+def test_image_no_resolved_path_gets_short_ack(monkeypatch):
+    """If chat.db's attachment table didn't resolve to an on-disk file
+    (e.g. race with iCloud download), the daemon sends a brief
+    'try again' ack rather than going silent or invoking claude."""
     _stub_state_for_handle_one(monkeypatch)
     daemon._recent_self_sends.clear()
     daemon._recent_outbound.clear()
     spy = _SendSpy()
     monkeypatch.setattr(daemon.imessage_sender, "send", spy)
 
-    msg = _msg("+15551234567", body="", has_attachment=True)
+    msg = _msg(
+        "+15551234567", body="", has_attachment=True, attachment_paths=(),
+    )
     daemon._handle_one(msg, _cfg())
 
     assert len(spy.sent) == 1
     handle, body, _ = spy.sent[0]
     assert handle == "+15551234567"
-    assert "attachment" in body.lower() or "image" in body.lower()
     assert "📎" in body
+    assert "isn't available yet" in body or "available yet" in body
 
 
-def test_image_with_caption_does_not_ack(monkeypatch):
-    """Captions should be processed as normal text, not trigger the
-    image-only ack. (The body has real intent; downstream code can
-    route it to claude or commands.)"""
+def test_image_with_resolved_path_calls_claude_with_augmented_prompt(monkeypatch):
+    """Regression: 2026-05-17 — Sam asked that images reach claude (not
+    just be acked). When attachment paths resolve, the daemon hands them
+    to claude in the prompt so claude can Read the image files."""
     _stub_state_for_handle_one(monkeypatch)
-    # Stub the claude-call path so we don't actually invoke claude or
-    # any downstream code; we just need to verify the image-ack short-
-    # circuit did NOT fire.
     daemon._recent_self_sends.clear()
     daemon._recent_outbound.clear()
     spy = _SendSpy()
     monkeypatch.setattr(daemon.imessage_sender, "send", spy)
-    # Short-circuit everything after the image-ack check by patching the
-    # pause + claude paths. We don't care what happens after, just that
-    # the image-ack reply text didn't go out.
-    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: True)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    # Trust resolves to a preset where active_preset.name is in (coding, full),
+    # so accept_edits flows through. Stub trust to return PRESET_FULL.
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
 
-    msg = _msg("+15551234567", body="caption text", has_attachment=True)
+    path = "/Users/samgobrail/Library/Messages/Attachments/ab/12/foo.jpeg"
+    msg = _msg(
+        "+15551234567", body="what is this?", has_attachment=True,
+        attachment_paths=(path,),
+    )
+    cfg = _cfg()
+    daemon._handle_one(msg, cfg)
+
+    assert len(runner_spy.calls) == 1, "claude must be invoked, not just acked"
+    prompt, _ = runner_spy.calls[0]
+    assert path in prompt
+    assert "what is this?" in prompt
+    assert "Read tool" in prompt
+
+
+def test_image_only_no_caption_calls_claude(monkeypatch):
+    """Image-only (no caption) but with resolved path: still hand off to
+    claude with an instruction to describe what it sees."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+
+    path = "/Users/samgobrail/Library/Messages/Attachments/cd/34/bar.png"
+    msg = _msg(
+        "+15551234567", body="", has_attachment=True,
+        attachment_paths=(path,),
+    )
     daemon._handle_one(msg, _cfg())
 
-    # If anything was sent, it must NOT be the image-only ack text.
-    for _, body, _ in spy.sent:
-        assert "I can't process images" not in body
+    assert len(runner_spy.calls) == 1
+    prompt, _ = runner_spy.calls[0]
+    assert path in prompt
+    assert "no caption" in prompt or "with no caption" in prompt
 
 
-def test_text_only_message_does_not_trigger_ack(monkeypatch):
+def test_text_only_message_does_not_trigger_attachment_path(monkeypatch):
     """Sanity: a plain text message (no attachment) doesn't accidentally
-    trigger the image-ack path."""
+    hit either the no-path ack or the image-prompt augmentation."""
     _stub_state_for_handle_one(monkeypatch)
     daemon._recent_self_sends.clear()
     daemon._recent_outbound.clear()
     spy = _SendSpy()
     monkeypatch.setattr(daemon.imessage_sender, "send", spy)
-    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: True)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
 
     msg = _msg("+15551234567", body="hello", has_attachment=False)
     daemon._handle_one(msg, _cfg())
 
     for _, body, _ in spy.sent:
         assert "📎" not in body
+    # If claude was invoked, the prompt should be just "hello" — no path
+    # injection on a plain text message.
+    if runner_spy.calls:
+        prompt, _ = runner_spy.calls[0]
+        assert "Read tool" not in prompt
+        assert "Files:" not in prompt

@@ -73,6 +73,15 @@ class Config:
     memory_backend: str = "none"
     memory_claude_md: Dict[str, object] = field(default_factory=dict)
     memory_custom: Dict[str, object] = field(default_factory=dict)
+    # File paths claude must NOT silently edit, even when accept_edits is
+    # enabled (trust=full/coding). Edits to any of these paths trigger
+    # the existing permission-relay flow so the user explicitly approves.
+    # Default: just CLAUDE.md, which is too foundational to mutate
+    # without a human in the loop. Operators can add more (e.g.
+    # ~/.claude/settings.json) per their threat model.
+    protected_files: List[str] = field(
+        default_factory=lambda: ["~/.claude/CLAUDE.md"]
+    )
 
     @property
     def allowlist_set(self) -> set:
@@ -332,6 +341,19 @@ def load(path: Path) -> Config:
     trust_default, trust_per_alias = _parse_trust(raw, session_aliases)
     memory_backend, memory_claude_md, memory_custom = _parse_memory(raw)
 
+    # protected_files: edits to these specific paths still require user
+    # confirmation via the permission-relay flow, even when accept_edits
+    # is on. Default is just CLAUDE.md (see dataclass default).
+    raw_protected = raw.get("protected_files")
+    if raw_protected is None:
+        protected_files = ["~/.claude/CLAUDE.md"]
+    elif not isinstance(raw_protected, list) or not all(
+        isinstance(p, str) for p in raw_protected
+    ):
+        raise ValueError("protected_files must be a list of strings")
+    else:
+        protected_files = list(raw_protected)
+
     return Config(
         project_directory=project_dir,
         allowlist=allowlist,
@@ -353,6 +375,7 @@ def load(path: Path) -> Config:
         memory_backend=memory_backend,
         memory_claude_md=memory_claude_md,
         memory_custom=memory_custom,
+        protected_files=protected_files,
     )
 
 
