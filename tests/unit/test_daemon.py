@@ -561,6 +561,152 @@ def test_image_only_no_caption_calls_claude(monkeypatch):
     assert "no caption" in prompt or "with no caption" in prompt
 
 
+# --- Inbound batching window -------------------------------------------
+
+def _clear_batches():
+    daemon._pending_batches.clear()
+
+
+def test_merge_batch_single_msg_passthrough():
+    """One message in the batch — merge returns it unchanged."""
+    m = _msg("+15551234567", body="hi")
+    merged = daemon._merge_batch([m])
+    assert merged is m
+
+
+def test_merge_batch_empty_returns_none():
+    assert daemon._merge_batch([]) is None
+
+
+def test_merge_batch_text_then_image(monkeypatch):
+    """Text + image arriving as adjacent rows merge into one logical
+    message: bodies concatenated, attachment_paths preserved, rowid +
+    timestamp from the last message."""
+    text_msg = imessage_reader.Message(
+        rowid=10, chat_guid="c1", is_group=False,
+        sender_handle="+15551234567",
+        timestamp_iso="2026-05-17T12:00:00Z",
+        body="look at this", body_truncated=False,
+        has_attachment=False, attachment_paths=(),
+    )
+    img_msg = imessage_reader.Message(
+        rowid=11, chat_guid="c1", is_group=False,
+        sender_handle="+15551234567",
+        timestamp_iso="2026-05-17T12:00:01Z",
+        body="", body_truncated=False,
+        has_attachment=True,
+        attachment_paths=("/tmp/img.jpeg",),
+    )
+    merged = daemon._merge_batch([text_msg, img_msg])
+    assert merged.body == "look at this"
+    assert merged.has_attachment is True
+    assert merged.attachment_paths == ("/tmp/img.jpeg",)
+    assert merged.rowid == 11  # last message
+    assert merged.timestamp_iso == "2026-05-17T12:00:01Z"
+
+
+def test_merge_batch_dedupes_and_caps_attachments():
+    """Attachment paths across messages should be deduped and capped at
+    MAX_ATTACHMENTS_PER_MESSAGE."""
+    msgs = []
+    cap = imessage_reader.MAX_ATTACHMENTS_PER_MESSAGE
+    # Build cap+3 unique paths spread across 3 messages, plus a dup
+    paths = [f"/tmp/img_{i}.jpeg" for i in range(cap + 3)]
+    for i, p in enumerate(paths):
+        msgs.append(imessage_reader.Message(
+            rowid=100 + i, chat_guid="c1", is_group=False,
+            sender_handle="+15551234567",
+            timestamp_iso="2026-05-17T12:00:00Z",
+            body="", body_truncated=False,
+            has_attachment=True, attachment_paths=(p, paths[0]),  # dup paths[0]
+        ))
+    merged = daemon._merge_batch(msgs)
+    assert len(merged.attachment_paths) == cap
+    # paths[0] appears exactly once despite being in every message
+    assert merged.attachment_paths.count(paths[0]) == 1
+
+
+def test_enqueue_then_flush_invokes_handle_one_once(monkeypatch):
+    """End-to-end: enqueue two messages, force-flush, _handle_one called
+    once with the merged result."""
+    _clear_batches()
+    _stub_state_for_handle_one(monkeypatch)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+
+    a = _msg("+15551234567", body="look")
+    b = _msg("+15551234567", body="at this", has_attachment=True,
+             attachment_paths=("/tmp/x.jpeg",))
+    daemon._enqueue_message(a, _cfg())
+    daemon._enqueue_message(b, _cfg())
+    # Both buffered, no claude call yet.
+    assert runner_spy.calls == []
+    flushed = daemon._flush_settled_batches(_cfg(), force=True)
+    assert flushed == 1
+    assert len(runner_spy.calls) == 1
+    prompt, _ = runner_spy.calls[0]
+    # Both bodies present in the prompt; attachment path included
+    assert "look" in prompt
+    assert "at this" in prompt
+    assert "/tmp/x.jpeg" in prompt
+
+
+def test_flush_respects_settle_window(monkeypatch):
+    """A batch whose last arrival is more recent than the settle window
+    must NOT flush yet."""
+    _clear_batches()
+    _stub_state_for_handle_one(monkeypatch)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+
+    daemon._enqueue_message(_msg("+15551234567", body="hi"), _cfg())
+    # Last arrival was just now — non-force flush should NOT process.
+    flushed = daemon._flush_settled_batches(_cfg(), force=False)
+    assert flushed == 0
+    assert runner_spy.calls == []
+    # Backdate the batch so it's settled.
+    for batch in daemon._pending_batches.values():
+        batch.last_arrival = batch.last_arrival - daemon.INBOUND_BATCH_SETTLE_SECONDS - 1
+    flushed = daemon._flush_settled_batches(_cfg(), force=False)
+    assert flushed == 1
+    assert len(runner_spy.calls) == 1
+
+
+def test_enqueue_does_not_batch_empty_skip(monkeypatch):
+    """Empty-skip sentinel messages process immediately (not buffered).
+    They're cursor-advance noise, not user input — we never want them
+    contaminating a batch keyed by '<empty-skip>'."""
+    _clear_batches()
+    _stub_state_for_handle_one(monkeypatch)
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+
+    msg = _msg("<empty-skip>", body="")
+    daemon._enqueue_message(msg, _cfg())
+    # No buffer entry; processed inline (and dropped by _decide).
+    assert "<empty-skip>" not in daemon._pending_batches
+
+
+def test_enqueue_separate_handles_separate_batches():
+    """Two handles get two separate batches that don't merge."""
+    _clear_batches()
+    a = _msg("+15551111111", body="from a")
+    b = _msg("+15552222222", body="from b")
+    # Force enqueue path (skipping _handle_one).
+    daemon._pending_batches.setdefault(a.sender_handle.lower(),
+                                       daemon._PendingBatch()).msgs.append(a)
+    daemon._pending_batches.setdefault(b.sender_handle.lower(),
+                                       daemon._PendingBatch()).msgs.append(b)
+    assert len(daemon._pending_batches) == 2
+
+
 def test_text_only_message_does_not_trigger_attachment_path(monkeypatch):
     """Sanity: a plain text message (no attachment) doesn't accidentally
     hit either the no-path ack or the image-prompt augmentation."""

@@ -28,8 +28,9 @@ import signal
 import sys
 import time
 from collections import Counter, deque
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Deque, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 from . import backups
 from . import claude_runner
@@ -166,6 +167,141 @@ OUTBOUND_PAUSE_THRESHOLD: int = 6
 OUTBOUND_PAUSE_WINDOW_SECONDS: float = 60.0
 OUTBOUND_PAUSE_RING_CAP: int = 512
 _recent_outbound: Deque[Tuple[float, str]] = deque(maxlen=OUTBOUND_PAUSE_RING_CAP)
+
+
+# --- Inbound batching window --------------------------------------------
+#
+# iMessage represents "text + image" as two adjacent chat.db rows: one
+# text row and one attachment row (within ~1s of each other). Without
+# batching, each row spawned its own claude call — the text-only one
+# replied "got it — what?" and the image one replied with the actual
+# description. Two replies, one useless, 2x cost. Sam asked for this
+# (2026-05-17 design conversation).
+#
+# Solution: per-handle settle window. New messages enqueue into a
+# per-handle buffer; the buffer's settle timer resets on every new
+# arrival. Once the buffer has been quiet for INBOUND_BATCH_SETTLE_SECONDS,
+# all messages in the buffer are merged into one logical Message and
+# passed to _handle_one as a single claude call.
+#
+# Cost: 3-6s latency on every reply (poll cycle + settle window).
+# Acceptable for the messaging-paced UX we're optimizing for.
+#
+# Cursor advances at enqueue time (in the main loop), so a crash during
+# a settle window loses the buffered messages but does NOT cause
+# duplicate processing on restart.
+INBOUND_BATCH_SETTLE_SECONDS: float = 3.0
+
+
+@dataclass
+class _PendingBatch:
+    """Mutable per-handle buffer of inbound messages awaiting settle."""
+    msgs: List = field(default_factory=list)
+    last_arrival: float = 0.0
+
+
+_pending_batches: dict = {}
+
+
+def _enqueue_message(msg, cfg) -> None:
+    """Add an inbound message to its handle's batch buffer.
+
+    Empty-skip rows (sentinel sender from imessage_reader) bypass the
+    buffer — they're noise we want to drop+audit immediately so the
+    cursor advance is reflected in metrics without waiting.
+    """
+    if msg.sender_handle == "<empty-skip>":
+        _handle_one(msg, cfg)
+        return
+    # Key by the raw sender_handle. _decide() normalizes per-call, but
+    # for buffering "+13015551212" and "+1 (301) 555-1212" coming from
+    # the same person across messages would be rare; keying raw is safer
+    # than half-normalizing.
+    key = msg.sender_handle.lower()
+    batch = _pending_batches.get(key)
+    if batch is None:
+        batch = _PendingBatch(msgs=[], last_arrival=time.time())
+        _pending_batches[key] = batch
+    batch.msgs.append(msg)
+    batch.last_arrival = time.time()
+
+
+def _merge_batch(msgs: list):
+    """Merge a list of Messages from the same handle into one logical
+    Message. Bodies concat with blank-line separators (preserving order),
+    attachment paths union (capped, dedup'd), rowid/timestamp from the
+    last message (latest in conversation order).
+
+    Returns None if msgs is empty.
+    """
+    if not msgs:
+        return None
+    if len(msgs) == 1:
+        return msgs[0]
+    first = msgs[0]
+    last = msgs[-1]
+    bodies = [m.body for m in msgs if m.body.strip()]
+    combined_body = "\n\n".join(bodies)
+    seen: set = set()
+    paths: list = []
+    cap = imessage_reader.MAX_ATTACHMENTS_PER_MESSAGE
+    for m in msgs:
+        for p in m.attachment_paths:
+            if p in seen:
+                continue
+            seen.add(p)
+            paths.append(p)
+            if len(paths) >= cap:
+                break
+        if len(paths) >= cap:
+            break
+    return imessage_reader.Message(
+        rowid=last.rowid,
+        chat_guid=first.chat_guid,
+        is_group=first.is_group,
+        sender_handle=first.sender_handle,
+        timestamp_iso=last.timestamp_iso,
+        body=combined_body,
+        body_truncated=any(m.body_truncated for m in msgs),
+        parse_warning=None,
+        has_attachment=any(m.has_attachment for m in msgs),
+        attachment_paths=tuple(paths),
+    )
+
+
+def _flush_settled_batches(cfg, *, force: bool = False) -> int:
+    """Drain any per-handle batches that have settled past the window.
+
+    ``force=True`` drains all batches regardless of settle state — used
+    on daemon shutdown so buffered messages aren't lost (their cursor
+    rowids have already advanced).
+
+    Returns the number of batches flushed (used by tests).
+    """
+    if not _pending_batches:
+        return 0
+    now = time.time()
+    settled: list = []
+    for key, batch in _pending_batches.items():
+        if force or (now - batch.last_arrival) >= INBOUND_BATCH_SETTLE_SECONDS:
+            settled.append(key)
+    for key in settled:
+        batch = _pending_batches.pop(key)
+        if len(batch.msgs) > 1:
+            _metrics["batched_groups"] += 1
+            _metrics["batched_messages"] += len(batch.msgs)
+        merged = _merge_batch(batch.msgs)
+        if merged is None:
+            continue
+        try:
+            _handle_one(merged, cfg)
+        except Exception as e:  # noqa: BLE001 — log + continue; main loop is more important
+            _metrics["handler_exceptions"] += 1
+            logger.exception(
+                "handler error on merged batch (size=%d): %s",
+                len(batch.msgs), e,
+            )
+    return len(settled)
 
 
 def _check_outbound_rate(handle: str, redacted: str) -> bool:
@@ -1335,8 +1471,9 @@ def main(argv: list[str] | None = None) -> int:
             new_messages = []
 
         for msg in new_messages:
-            # ORDER: cursor advances BEFORE send. A crash mid-send loses one
-            # reply (recoverable) rather than producing duplicates on retry.
+            # ORDER: cursor advances BEFORE enqueue. A crash mid-flush
+            # loses one buffered batch (recoverable — user re-sends)
+            # rather than producing duplicates on retry.
             try:
                 state.set_cursor(CURSOR_NAME, msg.rowid)
             except state.CursorRegression as e:
@@ -1344,11 +1481,17 @@ def main(argv: list[str] | None = None) -> int:
                              msg.rowid, e)
                 continue
             try:
-                _handle_one(msg, cfg)
+                _enqueue_message(msg, cfg)
             except Exception as e:
                 _metrics["handler_exceptions"] += 1
-                logger.exception("handler error on rowid=%s: %s", msg.rowid, e)
+                logger.exception("enqueue error on rowid=%s: %s", msg.rowid, e)
             cursor = msg.rowid
+
+        # Per-handle batching: flush any buffers that have been quiet
+        # for >= INBOUND_BATCH_SETTLE_SECONDS. Merges text + image
+        # arrivals into one claude call, which avoids the "two replies
+        # per logical send" UX problem.
+        _flush_settled_batches(cfg)
 
         # Periodic rate-counter pruning + heartbeat.
         now = time.time()
@@ -1377,6 +1520,17 @@ def main(argv: list[str] | None = None) -> int:
             if not _running:
                 break
             time.sleep(0.1)
+
+    # Force-flush any in-flight batches so buffered messages (whose
+    # cursor rowids have already advanced) don't disappear silently.
+    # Best-effort: if claude is down or we're being killed hard, we
+    # still log them via _handle_one's audit path.
+    try:
+        flushed = _flush_settled_batches(cfg, force=True)
+        if flushed:
+            logger.info("force-flushed %d pending batches on stop", flushed)
+    except Exception as e:  # noqa: BLE001
+        logger.error("force-flush on stop failed: %s", e)
 
     _heartbeat(
         state_dir=state_dir, cursor=cursor, cfg=cfg,
