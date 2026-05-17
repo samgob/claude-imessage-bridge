@@ -513,6 +513,41 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         )
         return
 
+    # Image / attachment handling. v0 cannot parse attachments (threat
+    # model S1 — attachment table is documented as a future concern).
+    # Before this fix, attachment-bearing rows were dropped at the SQL
+    # layer, so sending an image produced ZERO response — bad UX (Sam
+    # reported 2026-05-17). Now:
+    #   - Image-only (no caption): polite ack, no claude call.
+    #   - Image + caption: process the caption as a normal text body.
+    #     Claude doesn't see the image, but the caption usually carries
+    #     enough intent that a sensible response is possible. The user
+    #     gets actual functionality instead of silence.
+    if msg.has_attachment and not msg.body.strip():
+        ack_body = (
+            "📎 I see an attachment, but I can't process images or files "
+            "yet. Send me a text message describing what you need."
+        )
+        try:
+            imessage_sender.send(
+                imessage_sender.SendRequest(handle=norm, body=ack_body),
+                dry_run=False,
+            )
+            _record_self_send(norm, ack_body)
+            _metrics["attachment_acks"] += 1
+            state.audit(
+                handle_redacted=redacted,
+                direction="out",
+                kind="ack",
+                detail="attachment-only",
+                reply_bytes=len(ack_body.encode("utf-8")),
+                chatdb_rowid=msg.rowid,
+            )
+        except imessage_sender.SendError as e:
+            _metrics["send_errors"] += 1
+            logger.error("attachment-ack send failed: %s", e)
+        return
+
     # --- Natural-language intent + confirmation flow ------------------
     #
     # If we have a pending confirmation for this handle (60s TTL),

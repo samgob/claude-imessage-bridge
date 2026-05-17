@@ -90,6 +90,7 @@ class Message:
     body: str                 # capped at MAX_BODY_BYTES, BiDi NOT yet stripped
     body_truncated: bool      # True if body was longer than the cap
     parse_warning: Optional[str] = None  # set when attributedBody parse failed
+    has_attachment: bool = False  # row had cache_has_attachments=1 in chat.db
 
 
 def _extract_attributed_body_text(blob: bytes) -> Optional[str]:
@@ -196,9 +197,16 @@ def _connect(chatdb: Path) -> sqlite3.Connection:
 #                                       Animoji, third-party iMessage apps —
 #                                       their attributedBody contains app
 #                                       metadata, not a user message
-#   m.cache_has_attachments = 0      — v0 doesn't parse attachments; the
-#                                       text column for these often contains
-#                                       only U+FFFC OBJECT REPLACEMENT chars
+# NOTE on attachments: we no longer drop attachment-bearing rows at SQL.
+# Doing so meant images sent to the bridge produced ZERO response — bad UX
+# (Sam reported this 2026-05-17). Instead we:
+#   (a) surface the row with has_attachment=True
+#   (b) strip U+FFFC OBJECT REPLACEMENT chars from the body, so a caption
+#       (e.g. "look at this <image>") comes through as plain text
+#   (c) let the daemon decide: if there's a caption, process it as text;
+#       if image-only, send a polite "images aren't supported yet" ack.
+# We still do NOT parse the attachment payload — the threat model's
+# "no attachment parsing in v0" constraint holds.
 _FETCH_SQL: Final = """
 SELECT
     m.ROWID                AS rowid,
@@ -207,7 +215,8 @@ SELECT
     h.id                   AS sender_handle,
     m.date                 AS apple_date,
     m.text                 AS text_col,
-    m.attributedBody       AS attributed_body
+    m.attributedBody       AS attributed_body,
+    COALESCE(m.cache_has_attachments, 0) AS has_attachment
 FROM message AS m
 JOIN chat_message_join AS cmj ON cmj.message_id = m.ROWID
 JOIN chat              AS c   ON c.ROWID       = cmj.chat_id
@@ -219,7 +228,6 @@ WHERE m.ROWID > ?
   AND COALESCE(m.is_emote, 0) = 0
   AND COALESCE(m.item_type, 0) = 0
   AND m.balloon_bundle_id IS NULL
-  AND COALESCE(m.cache_has_attachments, 0) = 0
 ORDER BY m.ROWID ASC
 LIMIT ?
 """
@@ -247,13 +255,19 @@ def fetch_new_messages(
     for row in rows:
         body, truncated, warning = _row_body(row)
         sender = row["sender_handle"]
-        # Cursor-advance-on-skip: rows with no usable body OR no sender
-        # still yield, so the daemon advances its cursor past them.
-        # Sentinel handle "<empty-skip>" fails the daemon's allowlist
-        # gate (invalid-handle-format) → audited as drop → cursor
-        # advances. Without this, the daemon would re-read these rows
-        # forever every poll, re-emitting warnings.
-        if (not body.strip()) or (not sender):
+        has_attachment = bool(row["has_attachment"])
+        # Image/attachment caption text in chat.db is wrapped around U+FFFC
+        # (OBJECT REPLACEMENT). Strip those so a real caption survives and
+        # an image-only message becomes an empty body (which routes to the
+        # daemon's polite "images aren't supported yet" ack path).
+        if has_attachment and body:
+            body = body.replace("￼", "").strip()
+        # Cursor-advance-on-skip: rows with no usable body AND no
+        # attachment OR no sender still yield as empty-skip so the
+        # cursor advances. An image-only row (attachment + empty body)
+        # is intentionally surfaced with a real sender handle below so
+        # the daemon can ack it.
+        if (not sender) or ((not body.strip()) and not has_attachment):
             yield Message(
                 rowid=int(row["rowid"]),
                 chat_guid=row["chat_guid"] or "",
@@ -263,6 +277,7 @@ def fetch_new_messages(
                 body="",
                 body_truncated=False,
                 parse_warning=warning,
+                has_attachment=has_attachment,
             )
             continue
         yield Message(
@@ -274,6 +289,7 @@ def fetch_new_messages(
             body=body,
             body_truncated=truncated,
             parse_warning=warning,
+            has_attachment=has_attachment,
         )
 
 

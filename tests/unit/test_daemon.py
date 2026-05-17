@@ -18,7 +18,8 @@ from src import daemon, imessage_reader
 
 
 def _msg(handle: str, *, body: str = "hi", is_group: bool = False,
-         chat_guid: str = "1:1") -> imessage_reader.Message:
+         chat_guid: str = "1:1", has_attachment: bool = False,
+         ) -> imessage_reader.Message:
     return imessage_reader.Message(
         rowid=1,
         chat_guid=chat_guid,
@@ -27,6 +28,7 @@ def _msg(handle: str, *, body: str = "hi", is_group: bool = False,
         timestamp_iso="2024-01-01T00:00:00Z",
         body=body,
         body_truncated=False,
+        has_attachment=has_attachment,
     )
 
 
@@ -35,6 +37,8 @@ def _cfg(*, allowlist=("+15551234567",), groups=()) -> SimpleNamespace:
         allowlist=list(allowlist),
         allowlist_set=set(allowlist),
         allow_group_chat_guids=list(groups),
+        debug=False,
+        reply_rate_limit_per_minute=10,
     )
 
 
@@ -428,3 +432,87 @@ def test_daemon_main_loop_no_longer_top_level_pause_check():
         "/resume reachability over iMessage. The pause check should "
         "live inside _handle_one, gating only the claude-invocation path."
     )
+
+
+# --- Image / attachment ack path ---------------------------------------
+
+class _SendSpy:
+    def __init__(self):
+        self.sent: list = []
+
+    def __call__(self, request, *, dry_run=False):
+        self.sent.append((request.handle, request.body, dry_run))
+
+
+def _stub_state_for_handle_one(monkeypatch):
+    """Stub the state-layer side effects so _handle_one can run without
+    a real state.db. Returns nothing — caller still patches sender/etc."""
+    monkeypatch.setattr(daemon.state, "audit", lambda **_: None)
+    monkeypatch.setattr(
+        daemon.state, "reserve_reply_slot", lambda handle, limit: (True, 1),
+    )
+    monkeypatch.setattr(daemon.state, "get_pending_intent", lambda handle: None)
+    monkeypatch.setattr(daemon.state, "clear_pending_intent", lambda handle: None)
+    monkeypatch.setattr(daemon.state, "trip_pause", lambda **_: None)
+
+
+def test_image_only_message_gets_polite_ack(monkeypatch):
+    """Regression: 2026-05-17 — Sam reported no response when sending
+    images. Image-only rows now reach the daemon (instead of being
+    dropped at SQL) and produce a polite ack instead of silence."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    spy = _SendSpy()
+    monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+
+    msg = _msg("+15551234567", body="", has_attachment=True)
+    daemon._handle_one(msg, _cfg())
+
+    assert len(spy.sent) == 1
+    handle, body, _ = spy.sent[0]
+    assert handle == "+15551234567"
+    assert "attachment" in body.lower() or "image" in body.lower()
+    assert "📎" in body
+
+
+def test_image_with_caption_does_not_ack(monkeypatch):
+    """Captions should be processed as normal text, not trigger the
+    image-only ack. (The body has real intent; downstream code can
+    route it to claude or commands.)"""
+    _stub_state_for_handle_one(monkeypatch)
+    # Stub the claude-call path so we don't actually invoke claude or
+    # any downstream code; we just need to verify the image-ack short-
+    # circuit did NOT fire.
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    spy = _SendSpy()
+    monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+    # Short-circuit everything after the image-ack check by patching the
+    # pause + claude paths. We don't care what happens after, just that
+    # the image-ack reply text didn't go out.
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: True)
+
+    msg = _msg("+15551234567", body="caption text", has_attachment=True)
+    daemon._handle_one(msg, _cfg())
+
+    # If anything was sent, it must NOT be the image-only ack text.
+    for _, body, _ in spy.sent:
+        assert "I can't process images" not in body
+
+
+def test_text_only_message_does_not_trigger_ack(monkeypatch):
+    """Sanity: a plain text message (no attachment) doesn't accidentally
+    trigger the image-ack path."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    spy = _SendSpy()
+    monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: True)
+
+    msg = _msg("+15551234567", body="hello", has_attachment=False)
+    daemon._handle_one(msg, _cfg())
+
+    for _, body, _ in spy.sent:
+        assert "📎" not in body

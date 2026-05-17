@@ -170,14 +170,42 @@ def test_reader_filters_balloon_apps(tmp_path: Path):
     assert msgs == []
 
 
-def test_reader_filters_attachment_rows(tmp_path: Path):
+def test_reader_surfaces_image_only_with_attachment_flag(tmp_path: Path):
+    """Image-only rows used to be dropped at SQL — Sam got NO response when
+    he sent images (reported 2026-05-17). Now they're surfaced with
+    has_attachment=True and an empty body so the daemon can ack them.
+    """
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="￼",  # OBJECT REPLACEMENT
+        db, rowid=1, handle="+15551234567", text="￼",  # OBJECT REPLACEMENT only
         cache_has_attachments=1,
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
-    assert msgs == []
+    assert len(msgs) == 1
+    assert msgs[0].has_attachment is True
+    assert msgs[0].body == ""  # U+FFFC stripped → empty
+    assert msgs[0].sender_handle == "+15551234567"
+
+
+def test_reader_image_with_caption_strips_object_replacement(tmp_path: Path):
+    """Image + caption: the caption text survives, U+FFFC is stripped."""
+    db = _make_chatdb(tmp_path)
+    _insert_message(
+        db, rowid=1, handle="+15551234567",
+        text="￼look at this screenshot",  # OBJECT REPL + caption
+        cache_has_attachments=1,
+    )
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
+    assert msgs[0].has_attachment is True
+    assert msgs[0].body == "look at this screenshot"
+
+
+def test_reader_no_attachment_flag_for_text_only(tmp_path: Path):
+    db = _make_chatdb(tmp_path)
+    _insert_message(db, rowid=1, handle="+15551234567", text="hi")
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert msgs[0].has_attachment is False
 
 
 def test_reader_filters_participant_events(tmp_path: Path):
