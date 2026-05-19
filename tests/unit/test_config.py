@@ -131,6 +131,22 @@ def test_load_refuses_zero_cost_cap(tmp_path: Path, fake_claude_binary: Path):
         config_mod.load(cfg_path)
 
 
+def test_per_call_cost_cap_default_is_one_dollar(tmp_path: Path, fake_claude_binary: Path):
+    """Per-call default bumped from $0.50 to $1.00 (2026-05-19): the
+    $0.50 default was too tight for image-augmented prompts (vision
+    tokens + memory-backend context regularly pushed single calls to
+    $0.50-0.70). Daily cap still bounds total exposure."""
+    cfg_path = tmp_path / "config.yaml"
+    project = tmp_path / "proj"
+    project.mkdir()
+    data = _good_yaml(project, fake_claude_binary)
+    # Remove the explicit value to exercise the default codepath.
+    data.pop("per_call_cost_cap_usd", None)
+    _write(cfg_path, data)
+    cfg = config_mod.load(cfg_path)
+    assert cfg.per_call_cost_cap_usd == 1.00
+
+
 def test_load_refuses_per_call_cap_exceeding_daily(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"
     project = tmp_path / "proj"

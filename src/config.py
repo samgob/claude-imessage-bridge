@@ -311,7 +311,13 @@ def load(path: Path) -> Config:
     if cost <= 0:
         raise ValueError("daily_cost_cap_usd must be > 0")
 
-    per_call_cap = float(raw.get("per_call_cost_cap_usd", 0.50))
+    # Default $1.00. Was $0.50 — too tight for image-augmented prompts:
+    # a Read on a phone-resolution image is ~1500 vision tokens, and the
+    # memory backend's system-prompt context (CLAUDE.md + references)
+    # can be 20-40K tokens, so a single image-with-context call routinely
+    # lands $0.30-0.70. $1.00 gives headroom without weakening the daily
+    # cap (still bounded by daily_cost_cap_usd, default $5).
+    per_call_cap = float(raw.get("per_call_cost_cap_usd", 1.00))
     if per_call_cap <= 0:
         raise ValueError("per_call_cost_cap_usd must be > 0")
     if per_call_cap > cost:
