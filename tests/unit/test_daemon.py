@@ -729,6 +729,54 @@ def test_enqueue_does_not_batch_empty_skip(monkeypatch):
     assert "<empty-skip>" not in daemon._pending_batches
 
 
+def test_enqueue_force_flushes_at_per_handle_cap(monkeypatch):
+    """Regression: 2026-05-24 security review. A handle that never gives
+    the bridge 3 s of quiet would grow its batch unbounded. Add a cap
+    so we early-flush after MAX_BATCH_MSGS_PER_HANDLE."""
+    _clear_batches()
+    _stub_state_for_handle_one(monkeypatch)
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+
+    handle = "+15551234567"
+    cap = daemon.MAX_BATCH_MSGS_PER_HANDLE
+    # cap-1 messages: still buffered, no claude call.
+    for i in range(cap - 1):
+        daemon._enqueue_message(_msg(handle, body=f"msg-{i}"), _cfg())
+    assert runner_spy.calls == []
+    assert handle.lower() in daemon._pending_batches
+    # Cap-th message: trips early flush, one claude call with all cap msgs.
+    daemon._enqueue_message(_msg(handle, body="msg-final"), _cfg())
+    assert len(runner_spy.calls) == 1
+    # Buffer cleared for that handle after flush.
+    assert handle.lower() not in daemon._pending_batches
+
+
+def test_enqueue_cap_does_not_disturb_other_handles(monkeypatch):
+    """Hitting the cap on one handle must NOT flush another handle's
+    in-flight batch (it has its own settle window to honor)."""
+    _clear_batches()
+    _stub_state_for_handle_one(monkeypatch)
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+
+    other_handle = "+15559999999"
+    daemon._enqueue_message(_msg(other_handle, body="hi"), _cfg())
+
+    # Now blow past the cap on a different handle.
+    busy_handle = "+15551234567"
+    for i in range(daemon.MAX_BATCH_MSGS_PER_HANDLE):
+        daemon._enqueue_message(_msg(busy_handle, body=f"m{i}"), _cfg())
+
+    # Busy handle was flushed; other handle's batch is still buffered.
+    assert busy_handle.lower() not in daemon._pending_batches
+    assert other_handle.lower() in daemon._pending_batches
+
+
 def test_enqueue_separate_handles_separate_batches():
     """Two handles get two separate batches that don't merge."""
     _clear_batches()

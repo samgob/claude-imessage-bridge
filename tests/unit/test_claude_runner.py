@@ -85,6 +85,42 @@ def test_assert_safe_argv_rejects_non_string():
         claude_runner._assert_safe_argv(["claude", 42])  # type: ignore[list-item]
 
 
+def test_assert_safe_argv_rejects_missing_double_dash():
+    """argv MUST contain '--' before the prompt. Without it, a prompt
+    that starts with '--' could be reparsed as an additional flag by
+    claude's CLI parser. Defense in depth — code always builds with
+    '--', this check catches future regressions."""
+    argv = [
+        "/usr/local/bin/claude", "-p",
+        "--output-format", "json",
+        "hello",  # prompt, but no '--' before it
+    ]
+    with pytest.raises(claude_runner.RunnerConfigError, match="'--' separator"):
+        claude_runner._assert_safe_argv(argv)
+
+
+def test_assert_safe_argv_rejects_double_dash_not_at_end():
+    """'--' must immediately precede exactly ONE positional argument
+    (the prompt). A '--' followed by more flags / positionals is
+    structurally wrong."""
+    argv = [
+        "/usr/local/bin/claude", "-p",
+        "--", "hello", "extra",  # extra positional after the prompt
+    ]
+    with pytest.raises(claude_runner.RunnerConfigError, match="immediately precede"):
+        claude_runner._assert_safe_argv(argv)
+
+
+def test_assert_safe_argv_rejects_trailing_double_dash():
+    """'--' at the very end (no prompt after) is also wrong."""
+    argv = [
+        "/usr/local/bin/claude", "-p",
+        "--output-format", "json", "--",
+    ]
+    with pytest.raises(claude_runner.RunnerConfigError, match="immediately precede"):
+        claude_runner._assert_safe_argv(argv)
+
+
 # --- _scrubbed_env -------------------------------------------------------
 
 def test_scrubbed_env_only_allowlisted_keys(monkeypatch):
@@ -214,15 +250,81 @@ def test_run_claude_argv_has_double_dash_separator(captured_argv, fake_claude_bi
 def test_run_claude_argv_appends_resume_when_session_given(
     captured_argv, fake_claude_binary
 ):
+    sid = "8859efe4-1234-4abc-9def-abcdef012345"
     claude_runner.run_claude(
         "hello",
         trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
-        resume_session_id="abc-123",
+        resume_session_id=sid,
     )
     argv = captured_argv["argv"]
     assert "--resume" in argv
-    assert argv[argv.index("--resume") + 1] == "abc-123"
+    assert argv[argv.index("--resume") + 1] == sid
+
+
+# --- session_id format validator -----------------------------------------
+
+def test_validate_session_id_accepts_uuid():
+    sid = "8859efe4-1234-5678-9abc-def012345678"
+    assert claude_runner._validate_session_id(sid) == sid
+
+
+def test_validate_session_id_lowercases_input():
+    assert claude_runner._validate_session_id(
+        "8859EFE4-1234-5678-9ABC-DEF012345678"
+    ) == "8859efe4-1234-5678-9abc-def012345678"
+
+
+def test_validate_session_id_strips_whitespace():
+    assert claude_runner._validate_session_id(
+        "  8859efe4-1234-5678-9abc-def012345678  "
+    ) == "8859efe4-1234-5678-9abc-def012345678"
+
+
+def test_validate_session_id_rejects_flag_lookalike():
+    """Defense-in-depth: a session_id starting with `--` could be
+    interpreted as an additional flag by some downstream parser. The
+    UUID-shape regex blocks this entire class of input."""
+    with pytest.raises(claude_runner.RunnerConfigError, match="UUID shape"):
+        claude_runner._validate_session_id("--dangerous-flag")
+
+
+def test_validate_session_id_rejects_path_traversal():
+    """Same defense covers path-traversal characters."""
+    with pytest.raises(claude_runner.RunnerConfigError):
+        claude_runner._validate_session_id("../../../etc/passwd")
+
+
+def test_validate_session_id_rejects_shell_meta():
+    for evil in (";rm -rf /", "`whoami`", "$(echo)", "&& curl"):
+        with pytest.raises(claude_runner.RunnerConfigError):
+            claude_runner._validate_session_id(evil)
+
+
+def test_validate_session_id_rejects_empty():
+    with pytest.raises(claude_runner.RunnerConfigError):
+        claude_runner._validate_session_id("")
+
+
+def test_validate_session_id_rejects_non_string():
+    with pytest.raises(claude_runner.RunnerConfigError):
+        claude_runner._validate_session_id(None)  # type: ignore[arg-type]
+
+
+def test_run_claude_rejects_malformed_resume_session_id(
+    captured_argv, fake_claude_binary,
+):
+    """The argv-build path validates session_id — a malformed value
+    raises RunnerConfigError instead of being inserted into argv."""
+    with pytest.raises(claude_runner.RunnerConfigError, match="UUID shape"):
+        claude_runner.run_claude(
+            "hello",
+            trust_preset=trust.PRESET_CHAT_ONLY,
+            project_directory=Path("/tmp"),
+            allowed_tools_addons=[],
+            claude_bin=str(fake_claude_binary),
+            resume_session_id="not-a-uuid",
+        )
 
 
 def test_run_claude_argv_no_resume_when_session_none(

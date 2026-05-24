@@ -193,6 +193,17 @@ _recent_outbound: Deque[Tuple[float, str]] = deque(maxlen=OUTBOUND_PAUSE_RING_CA
 # duplicate processing on restart.
 INBOUND_BATCH_SETTLE_SECONDS: float = 3.0
 
+# Cap on messages held in a single per-handle batch. If the same handle
+# arrives faster than the settle window can drain (e.g. a sender that
+# never pauses 3 s between messages), the batch would grow indefinitely
+# without this bound — and the merged prompt would then trip the 32 KB
+# prompt cap downstream, but memory grew unbounded in the meantime.
+# When the cap is hit we flush the batch early (force=True) so the
+# handle stays responsive and memory stays bounded. Tuned to be well
+# above any plausible human-paced burst (the outbound-rate auto-PAUSE
+# threshold is 6/min for context).
+MAX_BATCH_MSGS_PER_HANDLE: int = 20
+
 
 @dataclass
 class _PendingBatch:
@@ -210,6 +221,9 @@ def _enqueue_message(msg, cfg) -> None:
     Empty-skip rows (sentinel sender from imessage_reader) bypass the
     buffer — they're noise we want to drop+audit immediately so the
     cursor advance is reflected in metrics without waiting.
+
+    If the per-handle batch hits ``MAX_BATCH_MSGS_PER_HANDLE`` we flush
+    early so a constant-traffic handle can't grow memory unbounded.
     """
     if msg.sender_handle == "<empty-skip>":
         _handle_one(msg, cfg)
@@ -225,6 +239,31 @@ def _enqueue_message(msg, cfg) -> None:
         _pending_batches[key] = batch
     batch.msgs.append(msg)
     batch.last_arrival = time.time()
+
+    # Bounded batch: if we've hit the per-handle cap, force-flush THIS
+    # batch only (don't disturb other handles' settle timers).
+    if len(batch.msgs) >= MAX_BATCH_MSGS_PER_HANDLE:
+        logger.info(
+            "batch cap (%d) hit for handle — early flush",
+            MAX_BATCH_MSGS_PER_HANDLE,
+        )
+        _metrics["batch_cap_early_flush"] += 1
+        # Pop and process directly; do NOT call _flush_settled_batches
+        # (which iterates every handle and may race on settle timers).
+        popped = _pending_batches.pop(key)
+        if len(popped.msgs) > 1:
+            _metrics["batched_groups"] += 1
+            _metrics["batched_messages"] += len(popped.msgs)
+        merged = _merge_batch(popped.msgs)
+        if merged is not None:
+            try:
+                _handle_one(merged, cfg)
+            except Exception as e:  # noqa: BLE001
+                _metrics["handler_exceptions"] += 1
+                logger.exception(
+                    "handler error on batch-cap flush (size=%d): %s",
+                    len(popped.msgs), e,
+                )
 
 
 def _merge_batch(msgs: list):

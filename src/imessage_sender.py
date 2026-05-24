@@ -94,6 +94,14 @@ def _strip_display_attacks(body: str) -> str:
     return "".join(out_chars)
 
 
+# Public alias — the same stripper is applied to INBOUND bodies in
+# imessage_reader so "what the audit log records" equals "what claude
+# sees" equals "what eventually goes out." Without this, a sender
+# embedding BiDi or zero-width chars could make the recipient see one
+# thing while the audit log + model see another (forensics gap).
+strip_display_attacks = _strip_display_attacks
+
+
 class HandleError(ValueError):
     """Handle didn't match an allowed format. Refuse to send."""
 

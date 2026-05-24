@@ -40,6 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, Iterator, Optional
 
+from . import imessage_sender
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CHATDB: Final = Path.home() / "Library" / "Messages" / "chat.db"
@@ -392,6 +394,14 @@ def _row_body(row: sqlite3.Row) -> tuple[str, bool, Optional[str]]:
     else:
         # No usable body.
         return ("", False, None)
+
+    # Strip BiDi format chars, zero-width chars, and C0/C1 controls
+    # from inbound bodies. Without this, a sender could embed
+    # invisible chars that make "what's logged" differ from "what the
+    # model sees" differ from "what the recipient renders" — a
+    # forensics gap and (with prompt injection) a real attack surface.
+    # The outbound sender already does this; keep both sides aligned.
+    body = imessage_sender.strip_display_attacks(body)
 
     encoded = body.encode("utf-8")
     if len(encoded) <= MAX_BODY_BYTES:

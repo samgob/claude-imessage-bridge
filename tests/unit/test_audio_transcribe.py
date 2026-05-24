@@ -124,7 +124,12 @@ def test_transcribe_returns_text_from_stdout(tmp_path, monkeypatch):
         assert "-m" in argv
         assert str(model) in argv
         assert "-f" in argv
-        assert str(audio) in argv
+        # WAV input is now staged into the per-call tempdir before
+        # whisper sees it (to keep the -otxt sidecar out of the user's
+        # iMessage attachments). So the argv carries the tempdir path,
+        # not the original.
+        f_idx = argv.index("-f")
+        assert "cimb-audio-" in argv[f_idx + 1]
         return _Done()
 
     monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
@@ -141,16 +146,25 @@ def test_transcribe_prefers_txt_sidecar_over_stdout(tmp_path, monkeypatch):
     model.write_bytes(b"x")
     monkeypatch.setattr(audio_transcribe, "resolve_binary", lambda explicit=None: fake_bin)
 
-    # whisper-cli with -otxt writes <audio>.txt. We simulate that.
-    sidecar = audio.with_suffix(audio.suffix + ".txt")
-    sidecar.write_text("sidecar transcript wins\n")
-
+    # whisper-cli with -otxt writes <input>.txt next to its input.
+    # Since we stage WAV into a tempdir, the sidecar lands there too.
+    # Simulate that: when fake whisper "runs", create the .txt next to
+    # the tempdir path argv carried.
     class _Done:
         returncode = 0
         stdout = b"stdout-fallback should be ignored"
         stderr = b""
 
-    monkeypatch.setattr(audio_transcribe.subprocess, "run", lambda *a, **k: _Done())
+    def fake_run(argv, **_k):
+        f_idx = argv.index("-f")
+        whisper_input_path = Path(argv[f_idx + 1])
+        sidecar = whisper_input_path.with_suffix(
+            whisper_input_path.suffix + ".txt"
+        )
+        sidecar.write_text("sidecar transcript wins\n")
+        return _Done()
+
+    monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
     assert audio_transcribe.transcribe(
         str(audio), model_path=str(model),
     ) == "sidecar transcript wins"
@@ -282,10 +296,16 @@ def test_transcribe_caf_runs_afconvert_before_whisper(tmp_path, monkeypatch):
     assert str(audio) not in calls[1]
 
 
-def test_transcribe_wav_skips_afconvert(tmp_path, monkeypatch):
-    """When the input is already WAV, no transcode happens — whisper is
-    invoked directly on the original file."""
+def test_transcribe_wav_staged_to_tempdir_not_processed_in_place(tmp_path, monkeypatch):
+    """Regression: 2026-05-24 security review. Even when input is already
+    WAV, whisper-cli with -otxt writes a `<input>.txt` sidecar adjacent
+    to the input. If we passed the original ~/Library/Messages/Attachments
+    path, whisper would litter sidecar .txt files in Apple's iMessage
+    store (which iCloud Messages may sync). We must stage the WAV into
+    our per-call tempdir so the sidecar lands in a directory we own and
+    clean up."""
     audio = _make_audio(tmp_path, name="voice.wav")
+    audio.write_bytes(b"RIFF" + b"\x00" * 100)  # plausible WAV bytes
     fake_bin = tmp_path / "bin"
     fake_bin.write_text("#")
     fake_bin.chmod(0o755)
@@ -306,8 +326,20 @@ def test_transcribe_wav_skips_afconvert(tmp_path, monkeypatch):
 
     monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
     audio_transcribe.transcribe(str(audio), model_path=str(model))
-    assert len(calls) == 1, "WAV should be one subprocess call, no transcode"
-    assert calls[0][0].endswith("bin")  # the fake whisper binary
+    # One subprocess call (whisper only — no afconvert for WAV).
+    assert len(calls) == 1
+    assert calls[0][0].endswith("bin")
+    # CRITICAL: whisper's -f input must NOT be the original audio file —
+    # it must be a copy inside the cimb-audio-* tempdir.
+    f_idx = calls[0].index("-f")
+    whisper_input = calls[0][f_idx + 1]
+    assert whisper_input != str(audio), (
+        "WAV must be staged into the tempdir, not processed in place — "
+        "otherwise whisper's -otxt sidecar leaks into the user's "
+        "~/Library/Messages/Attachments directory."
+    )
+    assert "cimb-audio-" in whisper_input
+    assert whisper_input.endswith(".wav")
 
 
 def test_transcribe_returns_none_when_afconvert_fails(tmp_path, monkeypatch):

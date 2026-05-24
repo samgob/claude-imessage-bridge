@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -144,6 +145,41 @@ ARGV_DENYLIST: Final = frozenset({
 # Hard cap on prompt length we'll pass to claude. The reader already caps
 # at 16KB; this is a second layer.
 MAX_PROMPT_BYTES: Final = 32 * 1024
+
+# Format check for any session_id we hand to ``claude --resume``. Claude
+# Code session IDs are UUIDv4-shaped — 8-4-4-4-12 lowercase hex. Some
+# call sites (e.g. the permission-relay pending-intent flow) persist the
+# session_id across a 15-minute TTL and pass it back to argv on the
+# retry. Validate strictly before argv injection so that a malformed
+# value can't impersonate a flag or sneak path-traversal characters
+# into a subsequent --resume invocation. ``_assert_safe_argv`` only
+# matches a fixed denylist of flag strings; it does NOT know argv
+# positions and would not catch a session_id of e.g.
+# ``--some-attacker-controlled-flag``. This regex is the right layer
+# to catch it.
+_SESSION_ID_RE: Final = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def _validate_session_id(value: str) -> str:
+    """Return ``value`` unchanged if it matches the UUID shape; raise
+    ``RunnerConfigError`` otherwise.
+
+    Lowercases the input first — Claude Code emits lowercase UUIDs, but
+    a defensive lower() lets us also accept any external integration
+    that hands us an upper-cased copy without weakening the regex.
+    """
+    if not isinstance(value, str):
+        raise RunnerConfigError(
+            f"session_id must be str, got {type(value).__name__}"
+        )
+    canonical = value.strip().lower()
+    if not _SESSION_ID_RE.match(canonical):
+        raise RunnerConfigError(
+            f"session_id does not match UUID shape: {value!r}"
+        )
+    return canonical
 
 # Minimal system prompt injected via --append-system-prompt. Three jobs:
 # 1. Set a tight role so the model doesn't reference Gmail/Slack/Drive/etc.
@@ -299,6 +335,25 @@ def _assert_safe_argv(
                 )
             if tok.startswith(bad + "=") and tok not in overrides:
                 raise RunnerConfigError(f"refusing argv with denylisted flag form: {tok!r}")
+
+    # Structural assertion: argv MUST contain "--" followed immediately
+    # by exactly one positional element (the prompt). The code builds
+    # it that way; this check catches any future refactor that drops
+    # the separator or inserts a flag after it. Without "--", a prompt
+    # that happens to start with "--" would be reparsed as an additional
+    # flag by argparse.
+    try:
+        sep_idx = argv.index("--")
+    except ValueError:
+        raise RunnerConfigError(
+            "argv missing '--' separator before the prompt"
+        ) from None
+    if sep_idx != len(argv) - 2:
+        raise RunnerConfigError(
+            f"argv has '--' at index {sep_idx} but argv length is "
+            f"{len(argv)} — '--' must immediately precede exactly one "
+            "positional argument (the prompt)"
+        )
 
 
 def _scrubbed_env(extra_passthrough: Iterable[str] = ()) -> dict:
@@ -641,7 +696,10 @@ def run_claude(
             # Resume the named session's transcript context. Tool authority
             # is STILL gated by --disallowed-tools above; the resumed
             # session's prior tool uses don't grant new authority.
-            argv += ["--resume", resume_session_id]
+            # Validate UUID-shape first — defense in depth so a malformed
+            # session_id from state.db (or future caller) can't sneak a
+            # flag-like value into argv.
+            argv += ["--resume", _validate_session_id(resume_session_id)]
         # --permission-mode=acceptEdits is appended when:
         # (a) accept_edits=True — the daemon's default for trust=full,
         #     so routine edits to non-protected files (e.g. memory

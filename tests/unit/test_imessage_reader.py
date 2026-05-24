@@ -288,6 +288,34 @@ def test_reader_respects_last_rowid(tmp_path: Path):
 
 # --- Body extraction / truncation --------------------------------------
 
+def test_reader_strips_bidi_chars_from_inbound_body(tmp_path: Path):
+    """Regression: 2026-05-24 security review. A sender embedding BiDi
+    or zero-width chars in their message body would make audit log,
+    model view, and rendered output diverge. The reader must strip
+    these on inbound, same as the sender already does on outbound."""
+    db = _make_chatdb(tmp_path)
+    # BiDi RIGHT-TO-LEFT OVERRIDE (U+202E) + ZERO-WIDTH SPACE (U+200B)
+    embedded = "before‮attack​after"
+    _insert_message(db, rowid=1, handle="+15551234567", text=embedded)
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
+    assert msgs[0].body == "beforeattackafter"
+    assert "‮" not in msgs[0].body
+    assert "​" not in msgs[0].body
+
+
+def test_reader_strips_c0_controls_from_inbound_body(tmp_path: Path):
+    """Same defense covers C0 control chars (except tab/newline/CR)."""
+    db = _make_chatdb(tmp_path)
+    _insert_message(
+        db, rowid=1, handle="+15551234567",
+        text="hello\x07world\nstill here\ttabbed",
+    )
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    # \x07 (BEL) stripped; \n and \t preserved.
+    assert msgs[0].body == "helloworld\nstill here\ttabbed"
+
+
 def test_reader_truncates_oversized_body(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     big = "A" * (imessage_reader.MAX_BODY_BYTES + 500)

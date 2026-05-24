@@ -212,12 +212,26 @@ def transcribe(
     # We hand off to afconvert (macOS-native) for anything non-WAV,
     # writing the converted file into a per-call tempdir so we always
     # clean up.
-    cleanup_dir: Optional[tempfile.TemporaryDirectory] = None
+    #
+    # Even when the input IS already WAV we route through the tempdir
+    # rather than passing the original path: whisper-cli's -otxt flag
+    # writes a `<input>.txt` sidecar adjacent to the input file. If we
+    # passed the original path under ~/Library/Messages/Attachments/,
+    # whisper would litter sidecar .txt files in the user's iMessage
+    # attachment store (which Apple may sync via iCloud Messages). The
+    # tempdir keeps the sidecar in a directory we own and clean up.
+    cleanup_dir = tempfile.TemporaryDirectory(prefix="cimb-audio-")
+    whisper_input = Path(cleanup_dir.name) / "in.wav"
     if p.suffix.lower() in _NATIVE_WAV_EXTS:
-        whisper_input = p
+        # Cheap copy — the file is ≤ 25 MB by the cap above, and we
+        # need it in our tempdir so the sidecar lands there too.
+        try:
+            shutil.copyfile(p, whisper_input)
+        except OSError as e:
+            logger.warning("failed to stage WAV %s into tempdir: %s", p, e)
+            cleanup_dir.cleanup()
+            return None
     else:
-        cleanup_dir = tempfile.TemporaryDirectory(prefix="cimb-audio-")
-        whisper_input = Path(cleanup_dir.name) / "in.wav"
         if not _transcode_to_wav(p, whisper_input):
             cleanup_dir.cleanup()
             return None
@@ -271,8 +285,7 @@ def transcribe(
         if not text:
             text = result.stdout.decode("utf-8", errors="replace").strip()
     finally:
-        if cleanup_dir is not None:
-            cleanup_dir.cleanup()
+        cleanup_dir.cleanup()
 
     if not text:
         return None
