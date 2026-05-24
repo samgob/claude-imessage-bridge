@@ -318,6 +318,13 @@ permission system, which we don't override even in full mode.
   or an explicit operator-controlled path (`whisper_binary` in
   config.yaml). Argv is a fixed shape — no shell, no user-controlled
   flags.
+- iMessage voice memos are CAF and other shares may be m4a/aac/mp3;
+  whisper.cpp's brew build only reads WAV. Non-WAV inputs are
+  transcoded via macOS-native `/usr/bin/afconvert` to a 16-kHz mono
+  WAV in a per-call tempdir. afconvert is invoked with a fixed argv
+  (no shell); source path comes from the chat.db attachment resolver
+  (already path-vetted); destination is a fresh tempfile we own. The
+  tempdir is cleaned up on every exit path.
 - **Size cap:** `MAX_AUDIO_BYTES = 25 MB` checked before spawn.
 - **Wallclock cap:** `TRANSCRIBE_TIMEOUT_SECONDS = 60`. Beyond this the
   process is killed and the call returns None.

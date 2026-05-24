@@ -75,7 +75,7 @@ def test_resolve_binary_explicit_missing_returns_none(tmp_path):
 
 # --- transcribe ---------------------------------------------------------
 
-def _make_audio(tmp_path: Path, name: str = "voice.caf", size: int = 100) -> Path:
+def _make_audio(tmp_path: Path, name: str = "voice.wav", size: int = 100) -> Path:
     p = tmp_path / name
     p.write_bytes(b"\x00" * size)
     return p
@@ -133,7 +133,7 @@ def test_transcribe_returns_text_from_stdout(tmp_path, monkeypatch):
 
 
 def test_transcribe_prefers_txt_sidecar_over_stdout(tmp_path, monkeypatch):
-    audio = _make_audio(tmp_path, name="voice.caf")
+    audio = _make_audio(tmp_path, name="voice.wav")
     fake_bin = tmp_path / "bin"
     fake_bin.write_text("#")
     fake_bin.chmod(0o755)
@@ -225,6 +225,119 @@ def test_transcribe_caps_transcript_length(tmp_path, monkeypatch):
     assert result is not None
     assert len(result.encode("utf-8")) <= audio_transcribe.MAX_TRANSCRIPT_BYTES + 50
     assert "truncated" in result
+
+
+def test_transcribe_caf_runs_afconvert_before_whisper(tmp_path, monkeypatch):
+    """Regression: 2026-05-19. Whisper.cpp's brew build only reads WAV.
+    iMessage voice memos are .caf, so the transcribe path must invoke
+    afconvert to produce a 16-kHz mono WAV first, then hand THAT to
+    whisper-cli."""
+    audio = _make_audio(tmp_path, name="voice.caf")
+    fake_bin = tmp_path / "bin"
+    fake_bin.write_text("#")
+    fake_bin.chmod(0o755)
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"x")
+    monkeypatch.setattr(audio_transcribe, "resolve_binary", lambda explicit=None: fake_bin)
+
+    calls: list = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        # First call: afconvert. Create the destination WAV so the
+        # transcode-success check passes.
+        if argv[0].endswith("afconvert"):
+            dst = Path(argv[-1])
+            dst.write_bytes(b"RIFF" + b"\x00" * 100)
+
+            class _Done:
+                returncode = 0
+                stdout = b""
+                stderr = b""
+            return _Done()
+        # Second call: whisper-cli on the converted WAV.
+
+        class _Done:
+            returncode = 0
+            stdout = b"hello world"
+            stderr = b""
+        return _Done()
+
+    monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
+    # Pretend afconvert exists.
+    monkeypatch.setattr(
+        type(audio_transcribe.AFCONVERT_BIN), "is_file",
+        lambda _self: True,
+    )
+
+    result = audio_transcribe.transcribe(str(audio), model_path=str(model))
+    assert result == "hello world"
+    # Verify ordering: afconvert called first, then whisper-cli.
+    assert len(calls) == 2
+    assert calls[0][0].endswith("afconvert")
+    # The whisper call's -f input must be a *.wav, NOT the original .caf
+    f_idx = calls[1].index("-f")
+    whisper_input = calls[1][f_idx + 1]
+    assert whisper_input.endswith(".wav")
+    assert str(audio) not in calls[1]
+
+
+def test_transcribe_wav_skips_afconvert(tmp_path, monkeypatch):
+    """When the input is already WAV, no transcode happens — whisper is
+    invoked directly on the original file."""
+    audio = _make_audio(tmp_path, name="voice.wav")
+    fake_bin = tmp_path / "bin"
+    fake_bin.write_text("#")
+    fake_bin.chmod(0o755)
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"x")
+    monkeypatch.setattr(audio_transcribe, "resolve_binary", lambda explicit=None: fake_bin)
+
+    calls: list = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+
+        class _Done:
+            returncode = 0
+            stdout = b"text"
+            stderr = b""
+        return _Done()
+
+    monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
+    audio_transcribe.transcribe(str(audio), model_path=str(model))
+    assert len(calls) == 1, "WAV should be one subprocess call, no transcode"
+    assert calls[0][0].endswith("bin")  # the fake whisper binary
+
+
+def test_transcribe_returns_none_when_afconvert_fails(tmp_path, monkeypatch):
+    """If the transcode step fails, transcribe returns None without
+    invoking whisper."""
+    audio = _make_audio(tmp_path, name="voice.caf")
+    fake_bin = tmp_path / "bin"
+    fake_bin.write_text("#")
+    fake_bin.chmod(0o755)
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"x")
+    monkeypatch.setattr(audio_transcribe, "resolve_binary", lambda explicit=None: fake_bin)
+    monkeypatch.setattr(
+        audio_transcribe, "_transcode_to_wav",
+        lambda *_a, **_k: False,
+    )
+    whisper_called = [False]
+
+    def fake_run(*_a, **_k):
+        whisper_called[0] = True
+
+        class _Done:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        return _Done()
+
+    monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
+    assert audio_transcribe.transcribe(str(audio), model_path=str(model)) is None
+    assert not whisper_called[0]
 
 
 def test_transcribe_returns_none_on_empty_output(tmp_path, monkeypatch):

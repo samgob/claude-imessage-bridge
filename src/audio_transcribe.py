@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Final, Optional
 
@@ -79,6 +80,64 @@ TRANSCRIBE_TIMEOUT_SECONDS: Final = 60
 # produce arbitrary text; we trim before returning so a malicious or
 # pathological audio file can't blow out the claude prompt budget.
 MAX_TRANSCRIPT_BYTES: Final = 16 * 1024
+
+# whisper.cpp's Homebrew build only reads WAV. iMessage voice memos are
+# CAF (Apple Core Audio Format), and other shares may be m4a/aac/mp3 —
+# all of which we have to transcode to 16-kHz mono WAV first. macOS
+# ships `afconvert` for free; it handles every iMessage-attachment
+# audio format we expect to see, no extra dependency.
+AFCONVERT_BIN: Final = Path("/usr/bin/afconvert")
+
+# Whisper.cpp's wav reader handles these directly — no transcode needed.
+_NATIVE_WAV_EXTS: Final = frozenset({".wav"})
+
+
+def _transcode_to_wav(
+    src: Path, dst: Path, timeout_seconds: int = 30,
+) -> bool:
+    """Convert ``src`` (any afconvert-supported format) to 16-kHz mono
+    WAV at ``dst``. Returns True on success.
+
+    16-kHz mono WAV matches whisper.cpp's expected input shape exactly,
+    so no further resampling happens inside whisper.cpp.
+    """
+    if not AFCONVERT_BIN.is_file():
+        logger.warning(
+            "afconvert not found at %s — can't transcode %s to WAV. "
+            "(afconvert ships with macOS; this should be impossible.)",
+            AFCONVERT_BIN, src,
+        )
+        return False
+    # Fixed argv. No shell. Source path comes from the chat.db
+    # attachment resolver (already vetted); dst is operator-controlled
+    # (a fresh tempfile in this module).
+    argv = [
+        str(AFCONVERT_BIN),
+        str(src),
+        "-f", "WAVE",
+        "-d", "LEI16@16000",  # little-endian int16, 16 kHz
+        "-c", "1",            # mono
+        str(dst),
+    ]
+    try:
+        proc = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("afconvert failed on %s: %s", src, e)
+        return False
+    if proc.returncode != 0:
+        logger.warning(
+            "afconvert exit=%d on %s: %s",
+            proc.returncode, src,
+            proc.stderr.decode("utf-8", errors="replace")[:300],
+        )
+        return False
+    return dst.is_file() and dst.stat().st_size > 0
 
 
 def resolve_binary(explicit: Optional[str] = None) -> Optional[Path]:
@@ -148,53 +207,72 @@ def transcribe(
         )
         return None
 
-    # Fixed argv — no shell, no user input. -nt: omit timestamps;
-    # -otxt: also write transcript to <input>.txt as a fallback for
-    # builds that don't print to stdout.
-    argv = [
-        str(bin_path),
-        "-m", str(model),
-        "-f", str(p),
-        "-nt",
-        "-otxt",
-    ]
+    # whisper.cpp's brew build reads only WAV. iMessage voice memos are
+    # .caf (Apple Core Audio); .m4a / .aac / .mp3 also need transcoding.
+    # We hand off to afconvert (macOS-native) for anything non-WAV,
+    # writing the converted file into a per-call tempdir so we always
+    # clean up.
+    cleanup_dir: Optional[tempfile.TemporaryDirectory] = None
+    if p.suffix.lower() in _NATIVE_WAV_EXTS:
+        whisper_input = p
+    else:
+        cleanup_dir = tempfile.TemporaryDirectory(prefix="cimb-audio-")
+        whisper_input = Path(cleanup_dir.name) / "in.wav"
+        if not _transcode_to_wav(p, whisper_input):
+            cleanup_dir.cleanup()
+            return None
+
     try:
-        result = subprocess.run(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        logger.error(
-            "whisper.cpp timeout on %s after %ds",
-            audio_path, timeout_seconds,
-        )
-        return None
-    except OSError as e:
-        logger.error("whisper.cpp spawn failed: %s", e)
-        return None
-
-    if result.returncode != 0:
-        logger.warning(
-            "whisper.cpp exit=%d on %s: %s",
-            result.returncode, audio_path,
-            result.stderr.decode("utf-8", errors="replace")[:400],
-        )
-        return None
-
-    # Prefer the .txt sidecar (more reliable across builds). Fall back
-    # to stdout.
-    txt_path = p.with_suffix(p.suffix + ".txt")
-    text: Optional[str] = None
-    if txt_path.is_file():
+        # Fixed argv — no shell, no user input. -nt: omit timestamps;
+        # -otxt: also write transcript to <input>.txt as a fallback for
+        # builds that don't print to stdout.
+        argv = [
+            str(bin_path),
+            "-m", str(model),
+            "-f", str(whisper_input),
+            "-nt",
+            "-otxt",
+        ]
         try:
-            text = txt_path.read_text(encoding="utf-8", errors="replace").strip()
+            result = subprocess.run(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "whisper.cpp timeout on %s after %ds",
+                audio_path, timeout_seconds,
+            )
+            return None
         except OSError as e:
-            logger.warning("failed to read sidecar %s: %s", txt_path, e)
-    if not text:
-        text = result.stdout.decode("utf-8", errors="replace").strip()
+            logger.error("whisper.cpp spawn failed: %s", e)
+            return None
+
+        if result.returncode != 0:
+            logger.warning(
+                "whisper.cpp exit=%d on %s: %s",
+                result.returncode, audio_path,
+                result.stderr.decode("utf-8", errors="replace")[:400],
+            )
+            return None
+
+        # Prefer the .txt sidecar (more reliable across builds). Fall
+        # back to stdout.
+        txt_path = whisper_input.with_suffix(whisper_input.suffix + ".txt")
+        text: Optional[str] = None
+        if txt_path.is_file():
+            try:
+                text = txt_path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError as e:
+                logger.warning("failed to read sidecar %s: %s", txt_path, e)
+        if not text:
+            text = result.stdout.decode("utf-8", errors="replace").strip()
+    finally:
+        if cleanup_dir is not None:
+            cleanup_dir.cleanup()
 
     if not text:
         return None
