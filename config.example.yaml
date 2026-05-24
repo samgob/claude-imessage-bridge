@@ -1,7 +1,8 @@
 # claude-imessage-bridge — config
 #
 # Copy to ~/.claude-imessage-bridge/config.yaml and fill in the blanks.
-# That path is in .gitignore by default; this example is.
+# Your real config.yaml is in .gitignore so secrets and personal handles
+# stay out of the repo; this example file is the only one checked in.
 
 # Absolute path to where Claude Code sessions should run. Typically your
 # main work directory (the one Claude Desktop opens to). The bridge will

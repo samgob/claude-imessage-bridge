@@ -4,7 +4,43 @@ All notable changes to claude-imessage-bridge. Versions follow [Semantic Version
 
 This project is **pre-1.0**. Public APIs (config schema, state.db schema, audit-log shape) may change between minor versions. Breaking changes are called out explicitly.
 
-## [Unreleased] — Session 3 (images, audio, edit UX)
+## [0.1.0-pre.1] — 2026-05-24 (Phase E: images, audio, edit UX)
+
+### Pre-publication hardening pass (2026-05-24)
+
+Closures from the paired security + polish reviews performed before
+flipping the repo public:
+
+- **Whisper sidecar no longer leaks into iMessage attachments dir.**
+  whisper-cli's `-otxt` flag writes `<input>.txt` adjacent to its
+  input. Previously, when an attachment was already WAV, the bridge
+  passed the chat.db path directly — whisper then wrote a sidecar
+  inside `~/Library/Messages/Attachments/`, which iCloud Messages
+  may sync. Fixed: all audio (including native WAV) is now staged
+  into a per-call tempdir before whisper sees it.
+- **`resume_session_id` UUID-shape validated at the argv-build path.**
+  The `_assert_safe_argv` denylist matches by flag string, not by
+  argv position. A malformed session_id of `--some-flag` would not
+  have been caught. Added an explicit regex check before argv
+  injection; same defense covers any `extra_arg` flowing from the
+  pending-intent permission-relay retry path.
+- **Per-handle batch buffer bounded.** A handle that never gives the
+  bridge 3 s of quiet would grow its batch unbounded.
+  `MAX_BATCH_MSGS_PER_HANDLE = 20` triggers an early flush.
+- **BiDi / zero-width / C0-control stripping on inbound bodies.** The
+  outbound sender already did this; the reader now does too, so the
+  audit log, the model's view, and the recipient's rendered text all
+  agree.
+- **Structural argv invariant: `--` must immediately precede the
+  prompt.** Defense in depth; code always builds it that way, this
+  check catches future regressions.
+- **Docs refreshed:** schema-version drift (v1 → v3) across
+  `AUDIT_LOG_COOKBOOK.md`, `RECOVERY.md`, `ARCHITECTURE.md`. Trust-mode
+  interaction explained in `TOOL_OPT_IN.md`. README adds Prerequisites
+  (Claude Code CLI), Memory backend section, badges. Internal dev
+  notes deleted from repo root.
+
+
 
 ### Added
 

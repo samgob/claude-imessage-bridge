@@ -33,8 +33,8 @@ Phase B's security boundary is holding.
 
 **Symptom:**
 ```
-state.db schema error: state.db has user_version=2, but this code only
-knows how to handle up to 1.
+state.db schema error: state.db has user_version=4, but this code only
+knows how to handle up to 3.
 ```
 
 **Meaning:** You ran a newer bridge against this state.db, then downgraded
@@ -153,8 +153,9 @@ python3 -m src.daemon --reset-cursor  # fresh DB, fresh cursor
 ```
 
 Open the `.corrupt` copy in `sqlite3` to extract anything you need
-(conversations table, audit history). The fresh DB will rebuild schema
-v1 on first start.
+(conversations table, audit history). The fresh DB will rebuild at
+the current schema version on first start (see `SCHEMA_VERSION` in
+`src/state.py` — v3 at time of writing).
 
 ## "Something's wrong but I don't know what"
 

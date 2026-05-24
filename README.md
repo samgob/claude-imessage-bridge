@@ -1,5 +1,10 @@
 # claude-imessage-bridge
 
+[![CI](https://github.com/samgob/claude-imessage-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/samgob/claude-imessage-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![macOS](https://img.shields.io/badge/macOS-only-lightgrey.svg)](#prerequisites)
+
 > ⚠ **Research preview.** Not yet stable. Treat installations as
 > experimental until v0.1 ships. See [SECURITY.md](SECURITY.md) and
 > [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) before installing.
@@ -56,6 +61,21 @@ routes each inbound message to a Claude Code session of your choice via
 | Per-handle batching window | ✅ | adjacent messages from the same handle merge into one claude call (3s settle) — handles "text + image" naturally |
 | Message edits / unsends | ❌ | first-seen content is what we processed; audit log records that |
 
+## Prerequisites
+
+- **macOS** (the AppleScript send path is macOS-coupled — no Linux/Windows
+  support).
+- **Python 3.11+**.
+- **Claude Code CLI** installed on `PATH`. The bridge invokes `claude -p`
+  as a subprocess; it does **not** ship with Claude Code. Install from
+  [Anthropic's docs](https://docs.anthropic.com/claude-code) and confirm
+  `which claude` returns a path before continuing. The default
+  install location is `/usr/local/bin/claude` — override via
+  `claude_binary:` in `config.yaml` if yours is elsewhere.
+- *(Optional)* **whisper.cpp** for voice-note transcription — see
+  [Images, voice notes, and edit permissions](#images-voice-notes-and-edit-permissions)
+  below.
+
 ## Quickstart
 
 ```bash
@@ -71,6 +91,11 @@ chmod 600 ~/.claude-imessage-bridge/config.yaml
 #   - allowlist:        your Apple ID email + any phones to permit
 #   - project_directory: absolute path to a Claude Code project
 #   - allowed_tools:     leave [] for text-only chat (recommended default)
+#   - trust:             defaults to chat_only. Flip to `coding` for
+#                        filesystem-aware Claude or `full` for the
+#                        "Claude Code in iMessage" experience. See the
+#                        config.example.yaml comments and
+#                        docs/THREAT_MODEL.md before changing.
 
 # Foreground run (Ctrl-C to stop):
 python3 -m src.daemon
@@ -84,6 +109,13 @@ and Automation > Messages (to send replies). The daemon refuses to
 start unless its empirical Bash-denied selftest passes — if Anthropic
 ever changes Claude Code's tool-flag semantics, you'll see a clear
 error before any user messages are processed.
+
+You can also talk to the bridge in plain English. A pattern-based intent
+classifier maps phrases like *"how much have I spent today"*, *"pause
+the bridge"*, *"what session am I in"* to the matching slash command,
+with confirmation prompts for anything destructive. Send `/help` to see
+the full command surface (16+ commands including `/status`, `/pause`,
+`/resume`, `/sources`, `/last`, `/cost-today`, `/tail-audit`, …).
 
 ## Images, voice notes, and edit permissions
 
@@ -182,6 +214,25 @@ the settle window). Fine for phone-paced messaging.
 process gives that process read access to everything in `~/Library/` and
 most of your home directory. Grant only after reading the code, or pin a
 specific commit and review it.
+
+## Memory backend (optional)
+
+In `coding` and `full` trust modes you can opt into the `claude_md`
+**memory backend**: every claude invocation gets a system-prompt
+injection containing your `~/.claude/CLAUDE.md` plus any
+`memory/projects/*.md` or `memory/people/*.md` files whose content
+matches the incoming message. This lets the bridge act with the same
+context you'd give a foreground Claude Code session — names, deals,
+preferences — without restating them in every message.
+
+Off by default. To enable, set `memory.backend: claude_md` in
+`config.yaml`. Capped at 32 KB per call with a 5-minute cache.
+Inspect what was loaded for the last call by sending `/sources`.
+
+`chat_only` trust mode **forces** the memory backend off regardless of
+this setting — defense in depth, so a single OSS user with a
+misconfigured config can't accidentally exfiltrate their memory tree
+to anyone on their allowlist.
 
 ## Networking
 

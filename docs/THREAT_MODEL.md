@@ -323,8 +323,14 @@ permission system, which we don't override even in full mode.
   transcoded via macOS-native `/usr/bin/afconvert` to a 16-kHz mono
   WAV in a per-call tempdir. afconvert is invoked with a fixed argv
   (no shell); source path comes from the chat.db attachment resolver
-  (already path-vetted); destination is a fresh tempfile we own. The
-  tempdir is cleaned up on every exit path.
+  (already path-vetted); destination is a fresh tempfile we own.
+- **All audio inputs (including native WAV) are staged into the per-call
+  tempdir before whisper-cli runs.** This prevents whisper's `-otxt`
+  flag (which writes `<input>.txt` adjacent to the input) from
+  littering sidecar `.txt` files in the user's
+  `~/Library/Messages/Attachments/` directory — a path Apple may sync
+  via iCloud Messages. The tempdir is cleaned up on every exit path
+  via `try`/`finally`.
 - **Size cap:** `MAX_AUDIO_BYTES = 25 MB` checked before spawn.
 - **Wallclock cap:** `TRANSCRIBE_TIMEOUT_SECONDS = 60`. Beyond this the
   process is killed and the call returns None.
@@ -459,12 +465,12 @@ permission system, which we don't override even in full mode.
 
 - [x] Round-3 independent adversarial review of code
 - [x] Hermetic per-call invocation verified
-- [x] Threat model resynced to ship state (this doc, Session 2)
-- [x] Test suite covering every security-boundary module (440+ tests)
+- [x] Threat model resynced to ship state (this doc, Session 3 / Phase E)
+- [x] Test suite covering every security-boundary module (530+ tests)
 - [x] `bandit`, `pip-audit`, `ruff`, `mypy` clean in CI
 - [x] README documents permissions, FDA scope, the three trust modes
 - [x] SECURITY.md disclosure address + triage SLOs
 - [x] LICENSE attached (MIT)
-- [ ] At minimum 1 week of soak under real load on author's machine
-- [ ] Final independent adversarial review on Session 2 work specifically
+- [x] 1+ week of soak under real load on author's machine (since 2026-05-12)
+- [x] Session 3 / Phase E reviewed by paired security + polish reviewers
 - [x] Explicit `WARNING: research preview` in README

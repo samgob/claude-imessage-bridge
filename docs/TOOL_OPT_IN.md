@@ -4,6 +4,26 @@ The bridge defaults to `allowed_tools: []` — pure text chat, no tools.
 This is the recommended posture. Adding tools to `allowed_tools` widens
 the attack surface in well-defined ways. Use this guide before opting in.
 
+## Trust-mode interaction (read first)
+
+This document is written for the **`chat_only`** trust preset (the
+default OSS posture). If you've flipped `trust.default: coding` or
+`trust.default: full`, the rules change — those presets *automatically*
+remove categories of tools from the deny list:
+
+| Preset | What's auto-removed from `HARD_DISALLOWED` |
+|---|---|
+| `chat_only` | nothing — full deny list applies |
+| `coding` | filesystem tools (`Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`, `Glob`, `LS`, `NotebookRead`) |
+| `full` | everything except `AskUserQuestion` — same posture as foreground Claude Code |
+
+In `coding` and `full` you don't need to add filesystem tools to
+`allowed_tools` — they're already available. The `allowed_tools` config
+key is layered on top of the preset's deny list and is most meaningful
+in `chat_only`. See [THREAT_MODEL.md](THREAT_MODEL.md) §Trust modes
+for the security model behind each preset; the rest of this doc
+walks through the per-tool opt-in decision for `chat_only`.
+
 ## Decision tree
 
 ### Step 1 — Do you actually need the tool?

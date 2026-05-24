@@ -186,5 +186,6 @@ See `THREAT_MODEL.md` for the full design. Highlights:
 - **Phase A:** chat.db reader + sender + echo daemon. No Claude. Proves plumbing + security baseline.
 - **Phase B:** Claude SDK call on incoming text, hermetic invocation, fresh session each time. No commands. Validates the LLM round-trip.
 - **Phase C:** `/sessions`, `/pick`, `/use <query>`, `/new`, `/help`, `/status`. Per-conversation session state. The differentiator.
-- **Phase D:** Test suite (193 unit tests), schema v1 migration, `status.json` health sidecar, threat-model resync, README + SECURITY polish, CI workflow, operator docs.
-- **Public:** LICENSE attached, final adversarial+solver review pair clear, soak under load, repo visibility flipped.
+- **Phase D:** Test suite, schema-migration framework (`SCHEMA_VERSION=3` at time of writing), `status.json` health sidecar, threat-model resync, README + SECURITY polish, CI workflow, operator docs.
+- **Phase E:** Image attachments handed to claude via Read tool, voice-note transcription via whisper.cpp (with afconvert transcoding), `accept_edits` + `protected_files` (auto-accept routine edits except for a denylist), per-handle inbound batching window, phantom-attachment defense, outbound-rate auto-PAUSE safety net.
+- **Public:** LICENSE attached, two-stream review (security + polish), repo visibility flipped.

@@ -1,11 +1,24 @@
 [project]
 name = "claude-imessage-bridge"
-version = "0.0.1.dev0"
+version = "0.1.0-pre.1"
 description = "Two-way Claude Code over iMessage with per-conversation session routing (macOS)."
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
     "pyyaml>=6.0,<7.0",
+]
+
+# Dev dependencies — pinned to the versions CI runs so contributors get
+# the same gate behavior locally. Install with:
+#   pip install -e ".[dev]"
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<10.0",
+    "ruff>=0.5,<1.0",
+    "mypy>=1.10,<2.0",
+    "bandit>=1.7,<2.0",
+    "pip-audit>=2.7,<3.0",
+    "detect-secrets>=1.5,<2.0",
 ]
 
 [project.scripts]

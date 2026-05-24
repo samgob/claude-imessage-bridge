@@ -14,7 +14,13 @@ sqlite3 -readonly ~/.claude-imessage-bridge/state.db
 
 The `-readonly` flag is important: the daemon may be writing concurrently.
 
-## Schema (v1)
+## Schema (v3)
+
+The bridge has versioned schemas with automatic forward migrations.
+The columns below reflect schema v3 (current); rows written under v1
+or v2 will have NULL in any later-added column. See
+`docs/RECOVERY.md` for migration internals and `src/state.py` for the
+authoritative `SCHEMA_VERSION` constant.
 
 ```sql
 CREATE TABLE audit_log (
