@@ -23,7 +23,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -82,6 +82,14 @@ class Config:
     protected_files: List[str] = field(
         default_factory=lambda: ["~/.claude/CLAUDE.md"]
     )
+    # Optional path overrides for offline audio transcription via
+    # whisper.cpp. When unset, the bridge:
+    #   - looks for `whisper-cli` or `main` on PATH;
+    #   - looks for the model at ~/whisper.cpp/models/ggml-base.en.bin.
+    # Missing either → audio messages get a setup-hint reply instead of
+    # confused silence. Neither path is required for image-only use.
+    whisper_binary: Optional[str] = None
+    whisper_model_path: Optional[str] = None
 
     @property
     def allowlist_set(self) -> set:
@@ -360,6 +368,16 @@ def load(path: Path) -> Config:
     else:
         protected_files = list(raw_protected)
 
+    # Optional whisper.cpp paths. Both default to None — the
+    # audio_transcribe module falls back to PATH lookup + ~/whisper.cpp
+    # model location when these are unset.
+    whisper_binary = raw.get("whisper_binary")
+    if whisper_binary is not None and not isinstance(whisper_binary, str):
+        raise ValueError("whisper_binary must be a string (or omitted)")
+    whisper_model_path = raw.get("whisper_model_path")
+    if whisper_model_path is not None and not isinstance(whisper_model_path, str):
+        raise ValueError("whisper_model_path must be a string (or omitted)")
+
     return Config(
         project_directory=project_dir,
         allowlist=allowlist,
@@ -382,6 +400,8 @@ def load(path: Path) -> Config:
         memory_claude_md=memory_claude_md,
         memory_custom=memory_custom,
         protected_files=protected_files,
+        whisper_binary=whisper_binary,
+        whisper_model_path=whisper_model_path,
     )
 
 

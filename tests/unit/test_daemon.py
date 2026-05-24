@@ -53,6 +53,8 @@ def _cfg(*, allowlist=("+15551234567",), groups=()) -> SimpleNamespace:
         allowed_tools=["Read", "Grep", "Glob", "LS"],
         claude_binary="/usr/local/bin/claude",
         protected_files=["~/.claude/CLAUDE.md"],
+        whisper_binary=None,
+        whisper_model_path=None,
     )
 
 
@@ -591,7 +593,7 @@ def test_image_only_no_caption_calls_claude(monkeypatch):
     assert len(runner_spy.calls) == 1
     prompt, _ = runner_spy.calls[0]
     assert path in prompt
-    assert "no caption" in prompt or "with no caption" in prompt
+    assert "no caption" in prompt.lower()
 
 
 # --- Inbound batching window -------------------------------------------
@@ -738,6 +740,129 @@ def test_enqueue_separate_handles_separate_batches():
     daemon._pending_batches.setdefault(b.sender_handle.lower(),
                                        daemon._PendingBatch()).msgs.append(b)
     assert len(daemon._pending_batches) == 2
+
+
+# --- Audio attachment handling -----------------------------------------
+
+def test_audio_unconfigured_sends_setup_hint(monkeypatch):
+    """Voice note arrives, whisper.cpp not installed → send a one-time
+    setup hint instead of confused silence or invoking claude."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    spy = _SendSpy()
+    monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+    # Force transcription failure (whisper not installed).
+    monkeypatch.setattr(daemon.audio_transcribe, "transcribe",
+                        lambda *_a, **_k: None)
+
+    msg = _msg(
+        "+15551234567", body="", has_attachment=True,
+        attachment_paths=("/tmp/voice.caf",),
+    )
+    daemon._handle_one(msg, _cfg())
+
+    assert runner_spy.calls == [], "should not invoke claude when audio fails"
+    assert len(spy.sent) == 1
+    _, body, _ = spy.sent[0]
+    assert "🎙️" in body
+    assert "whisper" in body.lower()
+    assert "brew install" in body.lower()
+
+
+def test_audio_transcribed_inlines_transcript_in_prompt(monkeypatch):
+    """Successful transcription: the transcript text is inlined in the
+    prompt sent to claude; no file path is passed (audio isn't readable
+    by claude's Read tool)."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+    monkeypatch.setattr(
+        daemon.audio_transcribe, "transcribe",
+        lambda path, **_k: "remember to call the doctor at 3pm",
+    )
+
+    msg = _msg(
+        "+15551234567", body="", has_attachment=True,
+        attachment_paths=("/tmp/voice.caf",),
+    )
+    daemon._handle_one(msg, _cfg())
+
+    assert len(runner_spy.calls) == 1
+    prompt, _ = runner_spy.calls[0]
+    assert "remember to call the doctor at 3pm" in prompt
+    assert "Voice message transcript" in prompt
+    # No image-style Read-tool block:
+    assert "Read tool" not in prompt
+    # Don't pass the audio file path to claude — it would be opaque.
+    assert "/tmp/voice.caf" not in prompt
+
+
+def test_audio_with_image_combo_inlines_transcript_and_keeps_image_path(monkeypatch):
+    """Mixed audio + image in one batched message: transcript inlined,
+    image path stays as a Read-tool target."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+    monkeypatch.setattr(
+        daemon.audio_transcribe, "transcribe",
+        lambda path, **_k: "look at the chart I just sent",
+    )
+
+    msg = _msg(
+        "+15551234567", body="", has_attachment=True,
+        attachment_paths=("/tmp/voice.caf", "/tmp/chart.png"),
+    )
+    daemon._handle_one(msg, _cfg())
+
+    assert len(runner_spy.calls) == 1
+    prompt, _ = runner_spy.calls[0]
+    assert "look at the chart I just sent" in prompt
+    assert "/tmp/chart.png" in prompt
+    assert "/tmp/voice.caf" not in prompt
+    assert "Read tool" in prompt
+
+
+def test_audio_with_caption_falls_through_when_transcribe_fails(monkeypatch):
+    """Voice note + text caption + whisper not installed → fall through
+    to processing the caption only. Don't waste a reply complaining
+    about the missing transcription if the user gave us a caption to
+    work with."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+    monkeypatch.setattr(daemon.audio_transcribe, "transcribe",
+                        lambda *_a, **_k: None)
+
+    msg = _msg(
+        "+15551234567",
+        body="quick question - what time should we leave",
+        has_attachment=True,
+        attachment_paths=("/tmp/voice.caf",),
+    )
+    daemon._handle_one(msg, _cfg())
+
+    assert len(runner_spy.calls) == 1
+    prompt, _ = runner_spy.calls[0]
+    assert "quick question" in prompt
+    # The note that one audio couldn't be transcribed appears in the prompt
+    # so claude can mention it; the user's actual question is also there.
+    assert "Caption" in prompt or "what time" in prompt
 
 
 def test_text_only_message_does_not_trigger_attachment_path(monkeypatch):

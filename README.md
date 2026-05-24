@@ -27,8 +27,9 @@ routes each inbound message to a Claude Code session of your choice via
 | **A** | Plumbing — chat.db reader + AppleScript sender + echo daemon | ✅ shipped |
 | **B** | Claude SDK invocation, hermetic per-call sandbox | ✅ shipped (3 rounds of adversarial review) |
 | **C** | `/sessions`, `/pick`, `/use`, `/new`, `/help` with numbered options + per-handle resume | ✅ shipped |
-| **D** | Test suite, threat-model resync, status.json, schema migrations, CI, README/SECURITY polish | 🚧 in progress |
-| **public** | License attached, public push to GitHub, final adversarial review | ⏳ blocked on Phase D + final review |
+| **D** | Test suite, threat-model resync, status.json, schema migrations, CI, README/SECURITY polish | ✅ shipped |
+| **E** | Images (via Read tool), audio (via whisper.cpp), auto-accept edits + `protected_files`, per-handle batching window | ✅ shipped |
+| **public** | License attached, public push to GitHub, final adversarial review | ⏳ in progress |
 
 ## Feature matrix
 
@@ -49,7 +50,10 @@ routes each inbound message to a Claude Code session of your choice via
 | Empirical Bash-denied selftest at startup | ✅ | refuses to start if denial regresses |
 | Group chats | ⚠️ opt-in only | explicit GUID allowlist; refused by default |
 | SMS | ❌ never | `handle.service = 'iMessage'` filter at SQL layer |
-| Attachments / images | ❌ | v0 chat surface only |
+| Images / PDFs | ✅ | paths handed to claude; `Read` tool views them inline (`trust=full` or `coding`) |
+| Voice notes / audio | ✅ optional | offline transcription via [whisper.cpp](https://github.com/ggerganov/whisper.cpp); install instructions below |
+| Auto-accept routine edits | ✅ | `trust=full` / `coding` mode default; `protected_files` (default `~/.claude/CLAUDE.md`) still gates explicit approval |
+| Per-handle batching window | ✅ | adjacent messages from the same handle merge into one claude call (3s settle) — handles "text + image" naturally |
 | Message edits / unsends | ❌ | first-seen content is what we processed; audit log records that |
 
 ## Quickstart
@@ -80,6 +84,92 @@ and Automation > Messages (to send replies). The daemon refuses to
 start unless its empirical Bash-denied selftest passes — if Anthropic
 ever changes Claude Code's tool-flag semantics, you'll see a clear
 error before any user messages are processed.
+
+## Images, voice notes, and edit permissions
+
+These features are active in `coding` and `full` trust modes only.
+`chat_only` (the OSS default) ignores attachments and has no edit
+authority.
+
+### Images / PDFs
+
+When you send an image or PDF, the bridge resolves its on-disk path
+(must live under `~/Library/Messages/Attachments/`, must exist) and
+hands it to claude in the prompt with a "use the Read tool to view"
+instruction. The Read tool handles image and PDF files natively — same
+code path as foreground Claude Code reading any local file.
+
+No setup required. Just send the image.
+
+### Voice notes (optional)
+
+Audio attachments (`.caf`, `.m4a`, `.mp3`, etc.) are transcribed
+**locally** via [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
+No network call, no third-party API. The transcript is inlined into
+the prompt as text.
+
+To enable:
+
+```bash
+brew install whisper-cpp
+
+# Download a model (base.en is a good speed/quality tradeoff for English
+# voice notes; ~150MB; ~1x realtime on Apple Silicon):
+mkdir -p ~/whisper.cpp/models
+cd ~/whisper.cpp/models
+curl -L -o ggml-base.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+```
+
+The bridge auto-discovers `whisper-cli` on `PATH` and looks for the
+model at `~/whisper.cpp/models/ggml-base.en.bin`. Override either via
+config:
+
+```yaml
+whisper_binary: /opt/homebrew/bin/whisper-cli   # explicit (optional)
+whisper_model_path: /path/to/your/model.bin     # explicit (optional)
+```
+
+If whisper.cpp isn't installed when a voice note arrives, the bridge
+sends a one-time setup-hint reply and skips claude (no cost incurred).
+
+### Auto-accept edits + `protected_files`
+
+In `coding` / `full` modes the bridge runs claude with
+`--permission-mode=acceptEdits` so routine edits to memory files,
+project notes, the health log, etc. go through without an
+iMessage round-trip for each one.
+
+A short `protected_files` list is enforced via inline
+`--settings` JSON `permissions.deny` rules. Edits to those paths
+still surface as `permission_denials` and route to the
+permission-relay flow (you get a "🔒 Claude wanted to edit ... Reply
+yes to approve" message; reply yes; the edit applies).
+
+Default protected set:
+
+```yaml
+protected_files:
+  - ~/.claude/CLAUDE.md
+```
+
+Extend if you want other files behind the gate. The relay never gives
+claude `bypassPermissions` authority — that flag is permanently refused
+by the runner regardless of caller opt-in.
+
+### Per-handle batching window
+
+iMessage stores "text + image" as two adjacent chat.db rows. Without
+batching each would spawn its own claude call (two replies to one
+logical user action, useless first one, 2x cost).
+
+The daemon buffers inbound messages per handle for 3 seconds. If
+another message from the same handle arrives in that window, both
+merge into one claude call. Bodies are concatenated; attachment paths
+are union'd.
+
+**Cost:** every reply gets 3–6s of added latency (one poll cycle plus
+the settle window). Fine for phone-paced messaging.
 
 ## Permissions required
 
@@ -147,8 +237,12 @@ Full design rationale: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 - **macOS-only.** AppleScript send path is fundamentally macOS-coupled.
 - **Single user.** The bridge runs as you, sends as you, reads your chat.db.
   There's no multi-tenant mode.
-- **No attachments.** v0 only handles plain text. Inbound images are filtered
-  out at the SQL layer (`cache_has_attachments = 1`).
+- **3–6s reply latency.** Per-handle batching window (3s) + poll
+  interval (3s default). The tradeoff: "text + image" combos merge
+  into one claude call instead of producing two replies.
+- **Audio requires whisper.cpp.** If you want voice-note transcription,
+  install whisper.cpp + a model (see above). Otherwise voice notes get
+  a one-time setup-hint reply.
 - **No edit/unsend handling.** If a message is edited after we read it, we
   process the first-seen version. The audit log records what we processed.
 - **No telemetry, no auto-update.** You pull updates manually.
@@ -156,8 +250,15 @@ Full design rationale: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   of the inbound message*. There's no API to "send to a different contact" —
   this is by design (see threat model S5).
 - **Cost-exhaustion within caps.** An allowlisted attacker can burn the daily
-  cap in ~60s at default settings (10 replies/min × $0.044/call). Lower
-  `daily_cost_cap_usd` or `reply_rate_limit_per_minute` if that worries you.
+  cap by saturating the rate limit. Lower `daily_cost_cap_usd` or
+  `reply_rate_limit_per_minute` if that worries you. Image / audio calls
+  cost more (vision tokens, memory context); the per-call default is $1.00.
+- **Phantom-attachment defense may drop slow-downloading images.**
+  Apple back-fills `cache_has_attachments=1` on metadata-only rows; we
+  drop attachment rows that have no resolvable path. If a real image
+  is still downloading from iCloud when we poll, we drop it — re-send
+  if needed. The alternative (acks firing hours later for no reason)
+  was worse.
 
 ## Operator docs
 

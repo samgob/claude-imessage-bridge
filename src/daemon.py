@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, List, Optional, Tuple
 
+from . import audio_transcribe
 from . import backups
 from . import claude_runner
 from . import commands as commands_mod
@@ -702,32 +703,103 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             attachment_paths=(),
         )
     elif msg.has_attachment:
-        # Build an augmented prompt. The caption (if any) becomes the
-        # user-intent text; the paths become an instruction block for
-        # claude. Claude is told explicitly that the paths point to
-        # files the user just sent — that's important context, the
-        # paths are not the user's words. We rebuild msg.body for the
-        # downstream pipeline; the original (caption-only) is in the
-        # audit log via chatdb_rowid.
-        path_list = "\n".join(f"  - {p}" for p in msg.attachment_paths)
+        # Partition attachments into audio (transcribable via whisper.cpp)
+        # and non-audio (image/PDF/etc — claude reads with the Read tool).
+        audio_paths = [
+            p for p in msg.attachment_paths if audio_transcribe.is_audio_file(p)
+        ]
+        readable_paths = [
+            p for p in msg.attachment_paths
+            if not audio_transcribe.is_audio_file(p)
+        ]
+
+        # Transcribe audio. Failed transcriptions return None — surface a
+        # setup-hint reply if EVERY audio file failed AND there's nothing
+        # else for claude to chew on.
+        transcripts: list = []
+        audio_failed = False
+        for ap in audio_paths:
+            t = audio_transcribe.transcribe(
+                ap,
+                binary=cfg.whisper_binary,
+                model_path=cfg.whisper_model_path,
+            )
+            if t:
+                transcripts.append((ap, t))
+            else:
+                audio_failed = True
+
         caption = msg.body.strip()
+
+        # All-audio message where transcription failed entirely and no
+        # caption to fall back on → send a one-time setup hint.
+        if (
+            audio_paths and not transcripts
+            and not readable_paths and not caption
+        ):
+            hint = (
+                "🎙️ I got a voice note but transcription isn't set up. "
+                "Install whisper.cpp:\n"
+                "  brew install whisper-cpp\n"
+                "Then download a model:\n"
+                "  bash ~/whisper.cpp/models/download-ggml-model.sh base.en\n"
+                "(or set whisper_binary / whisper_model_path in config.yaml)"
+            )
+            try:
+                imessage_sender.send(
+                    imessage_sender.SendRequest(handle=norm, body=hint),
+                )
+                _record_self_send(norm, hint)
+                _metrics["audio_transcribe_unconfigured"] += 1
+                state.audit(
+                    handle_redacted=redacted, direction="out", kind="ack",
+                    detail="audio-transcribe-unconfigured",
+                    reply_bytes=len(hint.encode("utf-8")),
+                    chatdb_rowid=msg.rowid,
+                )
+            except imessage_sender.SendError as e:
+                logger.error("audio-unconfigured send failed: %s", e)
+            return
+
+        # Build the augmented prompt. Transcripts are inlined as text;
+        # image/PDF paths get the same "use Read tool" treatment as before.
+        parts: list = []
+        if transcripts:
+            for ap, text in transcripts:
+                parts.append(f"Voice message transcript:\n{text}")
+        if audio_failed:
+            # Surface the failure to claude regardless of whether other
+            # transcripts succeeded — claude can mention it to the user
+            # ("I couldn't hear your voice note, but here's what I see").
+            parts.append(
+                "(Note: one or more voice notes could not be "
+                "transcribed and were skipped.)"
+            )
+        if readable_paths:
+            path_list = "\n".join(f"  - {p}" for p in readable_paths)
+            parts.append(
+                "Attached file(s) — use the Read tool to view each "
+                "before replying:\n" + path_list
+            )
         if caption:
-            augmented = (
-                "The user sent the following message with attached file(s).\n"
-                "Use the Read tool to view each file before replying.\n"
-                "Files:\n" + path_list + "\n\n"
-                "User's message:\n" + caption
+            parts.append(f"Caption:\n{caption}")
+        elif not transcripts and not readable_paths:
+            # All audio failed AND no caption AND no images. We'd have
+            # bailed above with the unconfigured-hint; this is a guard
+            # against a future refactor reaching here.
+            parts.append(
+                "The user sent attachment(s) but nothing could be "
+                "processed. Acknowledge briefly."
             )
         else:
-            augmented = (
-                "The user sent the following file(s) with no caption.\n"
-                "Use the Read tool to view each file, then respond with "
-                "a brief description of what you see or ask what they'd "
-                "like you to do with it.\n"
-                "Files:\n" + path_list
+            # We have something for claude (transcript or image), no
+            # caption — instruct it to respond to what's there.
+            parts.append(
+                "(No caption — respond to the voice note / image as "
+                "appropriate, or ask what they'd like you to do.)"
             )
-        # Replace msg.body for the downstream claude-invoke path. dataclasses
-        # are frozen, so build a new Message with the augmented body.
+
+        augmented = "\n\n".join(parts)
         msg = imessage_reader.Message(
             rowid=msg.rowid,
             chat_guid=msg.chat_guid,
@@ -737,8 +809,10 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             body=augmented,
             body_truncated=msg.body_truncated,
             parse_warning=msg.parse_warning,
-            has_attachment=True,
-            attachment_paths=msg.attachment_paths,
+            # Only flag has_attachment downstream for the image-bearing
+            # case (audio is already text now).
+            has_attachment=bool(readable_paths),
+            attachment_paths=tuple(readable_paths),
         )
 
     # --- Natural-language intent + confirmation flow ------------------

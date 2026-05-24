@@ -6,6 +6,32 @@ catalogs the defenses by which trust mode they apply in, so an OSS user
 flipping `trust.default: full` understands exactly which assumptions
 they're trading for utility.
 
+## What changed in Session 3
+
+Session 3 adds **image and audio attachment support** along with three
+related UX improvements that affect the defensive surface:
+
+- **Attachments → claude (S13).** The reader surfaces resolved file
+  paths for image / PDF attachments; the daemon hands them to claude
+  with a "use the Read tool" instruction so claude can see them. The
+  same code path Claude Code uses for any local image.
+- **Audio transcription (S14).** Voice notes are transcribed locally
+  via whisper.cpp (no network call) and inlined as text in the prompt.
+- **Auto-accept edits (S15).** `coding` / `full` modes auto-accept
+  file edits by default. A `protected_files` list (default just
+  `~/.claude/CLAUDE.md`) still requires the user to approve via the
+  permission-relay flow.
+- **Batching window (S16).** Adjacent messages from the same handle
+  merge into one claude call (3s settle window) — handles "text +
+  image" naturally.
+- **Phantom-attachment defense (S1).** chat.db routinely back-fills
+  `cache_has_attachments=1` on metadata-only rows hours after the
+  fact; we drop these silently to prevent spurious acks.
+
+These are bundled here because each one changes what the bridge does
+with attachment-bearing rows, and reviewing them in isolation misses
+the interaction.
+
 ## What changed in Session 2
 
 Prior versions of this doc were calibrated for **hermetic-by-default**:
@@ -158,9 +184,11 @@ of trust mode.
 - `handle.service = 'iMessage'` SQL filter (SMS dropped — caller-ID is spoofable).
 - Hard cap on body length (`MAX_BODY_BYTES = 16 KB`).
 - `attributedBody` parsed with stdlib `plistlib` only, 256 KB cap, rich-class refusal.
-- SQL-layer filters drop tapbacks, edits, expressive effects, participant-add/leave events, balloon-bundle apps, attachments.
+- SQL-layer filters drop tapbacks, edits, expressive effects, participant-add/leave events, and balloon-bundle apps.
+- Attachment rows ARE surfaced (image / audio / PDF support — see S13). The `attachment` + `message_attachment_join` tables are joined; file paths are vetted before any downstream use.
 - Strict allowlist check **before** any further processing.
 - Sender handle validated against E.164 or email regex.
+- **Phantom-attachment defense:** rows with `cache_has_attachments=1` but **no resolvable file path AND no caption** are yielded as `<empty-skip>` (cursor advances, no daemon response). Apple's chat.db routinely back-fills the attachment flag on rows for link-preview metadata, audio-message metadata, and delayed iCloud sync echoes; without this filter the bridge would emit spurious acks hours after any real activity.
 
 ### S2. Allowlist gating
 
@@ -256,11 +284,89 @@ permission system, which we don't override even in full mode.
 
 - Pattern-based regex matcher; NOT an LLM call. No prompt-injection
   surface in the classifier.
-- Destructive intents require explicit yes-confirmation via a 60s-TTL
-  pending state in `conversations.pending_intent_json`.
+- Destructive intents require explicit yes-confirmation via a
+  15-minute-TTL pending state in `conversations.pending_intent_json`.
 - Read-only intents execute immediately.
 - Slash commands (`/halt` etc.) pass through the classifier
   unchanged — explicit-form always works.
+
+### S13. Attachment file paths surfaced to claude (Session 3)
+
+- The attachment table is joined at fetch time; attachment filenames
+  resolve to absolute paths.
+- **Path-traversal defense:** every resolved path is checked to live
+  under `~/Library/Messages/Attachments/` before being surfaced. A
+  chat.db filename that resolves elsewhere is dropped silently.
+- **Existence check:** files that don't exist on disk (e.g. iCloud
+  download still in flight) are dropped.
+- **Per-message cap:** `MAX_ATTACHMENTS_PER_MESSAGE = 5`. Bounds prompt
+  growth from pathological photo-album sends.
+- Surfaced paths are inlined into the prompt with a "use the Read tool
+  to view" instruction. Claude Code's Read tool handles image / PDF
+  files natively; this is the same code path as foreground Claude Code
+  reading any local file.
+- The bridge does NOT decode attachment bytes itself; the contents
+  travel only via the Claude SDK to the API, where they are subject
+  to Anthropic's content policy.
+
+### S14. Audio transcription (Session 3)
+
+- Audio attachments (`.caf` / `.m4a` / `.mp3` / `.wav` / etc.) are
+  transcribed via locally-installed **whisper.cpp** — no network call,
+  no third-party API.
+- The whisper.cpp binary is discovered via `shutil.which` (PATH lookup)
+  or an explicit operator-controlled path (`whisper_binary` in
+  config.yaml). Argv is a fixed shape — no shell, no user-controlled
+  flags.
+- **Size cap:** `MAX_AUDIO_BYTES = 25 MB` checked before spawn.
+- **Wallclock cap:** `TRANSCRIBE_TIMEOUT_SECONDS = 60`. Beyond this the
+  process is killed and the call returns None.
+- **Output cap:** `MAX_TRANSCRIPT_BYTES = 16 KB` enforced on the
+  transcript before handing to the daemon — prevents a pathological
+  audio file from blowing out the claude prompt budget.
+- Transcripts are treated as **untrusted user text** — they get the
+  same prompt-injection exposure as any other message body and are
+  bounded by the prompt cap (32 KB) and the trust mode's tool deny list.
+- **Failure modes:** binary missing, model missing, file too large, or
+  process error → `transcribe()` returns None. The daemon surfaces a
+  one-time setup-hint reply if every audio file in a message failed
+  AND there's no caption to fall back on.
+
+### S15. Auto-accept edits with protected-files exception (Session 3)
+
+- `coding` and `full` trust modes pass `--permission-mode=acceptEdits`
+  by default so routine edits to memory files, project notes, etc. go
+  through without round-tripping each one to the user.
+- A small list of **protected files** (default: `~/.claude/CLAUDE.md`)
+  is enforced via inline `--settings` JSON with `permissions.deny`
+  rules. Edits to those paths still surface as `permission_denials`,
+  routing to the existing permission-relay flow for explicit user
+  approval.
+- The `_assert_safe_argv` invariant continues to refuse
+  `--permission-mode=bypassPermissions` and `--dangerously-skip-permissions`
+  regardless of caller override. Only `--permission-mode=acceptEdits`
+  is unlockable via the explicit `allow_overrides` mechanism.
+- On the relay-retry path (user approved a previously-denied edit),
+  the deny rules are **omitted** from `--settings` so the approved
+  edit actually applies.
+
+### S16. Per-handle inbound batching window (Session 3)
+
+- iMessage represents "text + image" as two adjacent chat.db rows
+  (~1s apart). Without batching, each row would spawn its own claude
+  call — wasteful and confusing.
+- The daemon buffers inbound messages per handle and processes them as
+  one logical message after a 3-second quiet window. Bodies are
+  concatenated; attachment paths are union'd and capped.
+- **Cursor semantics unchanged:** cursor advances when each row is
+  yielded by the reader, not when the batch is processed. A crash
+  during a settle window loses buffered messages (user re-sends) but
+  never causes duplicate processing on restart.
+- **Per-handle isolation:** batches are keyed by raw sender handle;
+  no cross-handle mixing.
+- **Empty-skip bypass:** sentinel `<empty-skip>` rows process inline,
+  never buffered (otherwise spurious skip-rows would contaminate a
+  batch).
 
 ## Residual risks (accepted)
 
@@ -318,6 +424,29 @@ permission system, which we don't override even in full mode.
     `coding` and `full` modes with `memory.backend: claude_md`, asking
     the bridge "what's in your CLAUDE.md" gets a useful answer.
     Reviewing what got loaded for the last call: send `/sources`.
+
+13. **Image / audio content travels to Anthropic.** Attachment file
+    paths handed to claude are read by the Read tool and the file
+    bytes (image pixels, transcribed audio text) become part of the
+    API request. Subject to Anthropic's content policy and retention.
+    Operators concerned about specific content should not send it
+    through the bridge; the trust mode controls reach Claude, not
+    Anthropic.
+
+14. **Prompt injection via image OCR.** A maliciously-crafted image
+    sent to the bridge could contain text that claude reads as
+    instructions. The bridge doesn't OCR images itself, but claude's
+    vision tokens carry the same prompt-injection surface as text.
+    `protected_files` is the primary defense; trust=full operators
+    accept this risk by definition.
+
+15. **Audio transcription quality.** whisper.cpp is good but not
+    perfect — misheard words become text in the prompt. The user
+    decides what to send; the bridge does not retry or warn.
+
+16. **Batching latency.** The 3-second settle window adds 3-6s to
+    every reply. Acceptable for phone-paced messaging; not for a
+    chatbot UI.
 
 ## Pre-public-release gates
 

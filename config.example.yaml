@@ -156,3 +156,31 @@ session_aliases: {}
 #   custom:
 #     script: ''
 #     timeout_seconds: 5
+
+# --- Protected files (Session 3) -------------------------------------
+# Edits to these specific paths require explicit user approval via the
+# permission-relay flow (the bridge sends a "🔒 Reply yes to approve"
+# prompt) even when accept_edits is on (the default in `coding` and
+# `full` modes).
+#
+# Default: just CLAUDE.md, which is too foundational to mutate without
+# a human in the loop.
+#
+# protected_files:
+#   - ~/.claude/CLAUDE.md
+#   - ~/.claude/settings.json
+
+# --- Voice-note transcription (Session 3) ----------------------------
+# Audio attachments are transcribed offline via whisper.cpp. Both
+# settings are optional — the bridge auto-discovers `whisper-cli` on
+# PATH and looks for the model at ~/whisper.cpp/models/ggml-base.en.bin.
+# Set explicitly if you've installed elsewhere.
+#
+# Install (one-time):
+#   brew install whisper-cpp
+#   mkdir -p ~/whisper.cpp/models
+#   curl -L -o ~/whisper.cpp/models/ggml-base.en.bin \
+#     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+#
+# whisper_binary: /opt/homebrew/bin/whisper-cli
+# whisper_model_path: ~/whisper.cpp/models/ggml-base.en.bin
