@@ -73,6 +73,24 @@ def test_preset_disallowed_tools_are_frozen():
         assert isinstance(preset.disallowed_tools, frozenset)
 
 
+def test_coding_and_full_carry_resume_scope_prompt():
+    """Regression: 2026-05-24. Session resume brings prior augmented
+    prompts into the transcript ("The user sent file X..."). Without a
+    scoping system prompt, the model can read past-tense attachments as
+    present-tense in the new turn ("I see the screenshot — already
+    logged" — referencing yesterday's screenshot as if just shared)."""
+    from src import claude_runner
+    for p in (trust.PRESET_CODING, trust.PRESET_FULL):
+        assert p.extra_system_prompt == claude_runner.BRIDGE_RESUME_SCOPE_PROMPT, (
+            f"{p.name} preset must carry the resume-scope clarifier"
+        )
+        # The clarifier must mention the time-scope to actually do its job.
+        assert "current" in p.extra_system_prompt.lower()
+        assert "past" in p.extra_system_prompt.lower() \
+            or "historical" in p.extra_system_prompt.lower() \
+            or "earlier" in p.extra_system_prompt.lower()
+
+
 # --- get_preset -----------------------------------------------------------
 
 @pytest.mark.parametrize("name,expected", [

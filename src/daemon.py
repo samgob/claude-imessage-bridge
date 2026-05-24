@@ -778,8 +778,10 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         if readable_paths:
             path_list = "\n".join(f"  - {p}" for p in readable_paths)
             parts.append(
-                "Attached file(s) — use the Read tool to view each "
-                "before replying:\n" + path_list
+                "Attachment(s) on THIS message (only these — earlier "
+                "turns may reference past attachments that are not "
+                "present now). Use the Read tool to view each before "
+                "replying:\n" + path_list
             )
         if caption:
             parts.append(f"Caption:\n{caption}")

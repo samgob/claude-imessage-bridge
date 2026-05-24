@@ -165,6 +165,26 @@ BRIDGE_SYSTEM_PROMPT: Final = (
     "available here. Keep replies under 1500 characters."
 )
 
+# Time-scope clarifier injected for trust=full / trust=coding sessions
+# that use --resume. When a session resumes a prior conversation, the
+# transcript contains earlier augmented prompts that referenced
+# attachments ("The user sent file X..."). Without this clarifier, the
+# model can confuse those past attachments with the current message —
+# observed 2026-05-24 with Sam: a voice note arrived alone, the model
+# replied "I see the screenshot — already logged" referencing yesterday's
+# screenshot in the resumed transcript as if it were freshly attached.
+BRIDGE_RESUME_SCOPE_PROMPT: Final = (
+    "You are reached via an iMessage bridge. Each user turn arrives "
+    "as a single message, possibly with attachment(s) listed explicitly "
+    "in that turn. When this conversation contains prior turns (the "
+    "session has been resumed), prior turns may reference attachments "
+    "the user sent earlier — those are HISTORICAL, not part of the "
+    "current message. Only attachments listed in the CURRENT user turn "
+    "are present right now. Phrase any reference to past attachments in "
+    "past tense (\"the screenshot you sent yesterday\"), not as if the "
+    "user just shared them again."
+)
+
 # Environment variables the child inherits. Everything else is dropped.
 #
 # Notably absent:

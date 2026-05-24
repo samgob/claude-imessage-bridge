@@ -139,7 +139,7 @@ PRESET_CODING: TrustPreset = TrustPreset(
     disallowed_tools=claude_runner.HARD_DISALLOWED - _CODING_FILESYSTEM_TOOLS,
     max_turns=10,
     memory_backend="claude_md",
-    extra_system_prompt=None,
+    extra_system_prompt=claude_runner.BRIDGE_RESUME_SCOPE_PROMPT,
     extra_env_passthrough=frozenset({"GH_TOKEN", "GITHUB_TOKEN"}),
 )
 
@@ -156,7 +156,7 @@ PRESET_FULL: TrustPreset = TrustPreset(
     disallowed_tools=frozenset({"AskUserQuestion"}),
     max_turns=20,
     memory_backend="claude_md",
-    extra_system_prompt=None,
+    extra_system_prompt=claude_runner.BRIDGE_RESUME_SCOPE_PROMPT,
     # MCP-prefixed env vars (Anthropic-provided OAuth tokens etc.) are
     # passed through pattern-matched at scrub time; here we list the
     # commonly-named singletons.
