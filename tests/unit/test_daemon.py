@@ -485,26 +485,59 @@ def _stub_state_for_handle_one(monkeypatch):
     monkeypatch.setattr(daemon.state, "trip_pause", lambda **_: None)
 
 
-def test_image_no_resolved_path_gets_short_ack(monkeypatch):
-    """If chat.db's attachment table didn't resolve to an on-disk file
-    (e.g. race with iCloud download), the daemon sends a brief
-    'try again' ack rather than going silent or invoking claude."""
+def test_image_no_resolved_path_no_caption_silent_drop(monkeypatch):
+    """Phantom attachment rows (has_attachment=1 but no resolved path AND
+    no caption) are an iCloud sync artifact — Apple back-fills
+    cache_has_attachments=1 on rows for link previews, audio-message
+    metadata, etc., hours after the actual send. Sam reported spurious
+    📎 'try resending' acks firing in the morning with no real activity
+    (2026-05-19). Now we silently drop these instead of pestering."""
     _stub_state_for_handle_one(monkeypatch)
     daemon._recent_self_sends.clear()
     daemon._recent_outbound.clear()
     spy = _SendSpy()
     monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
 
     msg = _msg(
         "+15551234567", body="", has_attachment=True, attachment_paths=(),
     )
     daemon._handle_one(msg, _cfg())
 
-    assert len(spy.sent) == 1
-    handle, body, _ = spy.sent[0]
-    assert handle == "+15551234567"
-    assert "📎" in body
-    assert "isn't available yet" in body or "available yet" in body
+    # Silent drop: no outbound reply, no claude call.
+    assert spy.sent == []
+    assert runner_spy.calls == []
+
+
+def test_image_no_resolved_path_with_caption_falls_through_to_text(monkeypatch):
+    """If the attachment can't be resolved but there's a caption, drop the
+    attachment marker and process the caption as plain text. Don't waste
+    a message complaining about the missing file — the caption is what
+    the user wanted answered."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()
+    daemon._recent_outbound.clear()
+    monkeypatch.setattr(daemon.imessage_sender, "send", _SendSpy())
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+
+    msg = _msg(
+        "+15551234567",
+        body="what time is it",
+        has_attachment=True,
+        attachment_paths=(),
+    )
+    daemon._handle_one(msg, _cfg())
+
+    assert len(runner_spy.calls) == 1
+    prompt, _ = runner_spy.calls[0]
+    # Caption goes through as the plain prompt; no Read-tool augmentation.
+    assert prompt == "what time is it"
+    assert "Read tool" not in prompt
+    assert "Files:" not in prompt
 
 
 def test_image_with_resolved_path_calls_claude_with_augmented_prompt(monkeypatch):

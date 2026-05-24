@@ -202,21 +202,49 @@ def test_reader_filters_balloon_apps(tmp_path: Path):
     assert msgs == []
 
 
-def test_reader_surfaces_image_only_with_attachment_flag(tmp_path: Path):
-    """Image-only rows used to be dropped at SQL — Sam got NO response when
-    he sent images (reported 2026-05-17). Now they're surfaced with
-    has_attachment=True and an empty body so the daemon can ack them.
-    """
+def test_reader_phantom_attachment_yields_as_empty_skip(tmp_path: Path):
+    """Attachment-flagged row with NO resolvable path AND NO caption is
+    treated as a phantom (iCloud sync artifact — link preview metadata,
+    audio-message metadata, delayed echo). Yield as empty-skip so the
+    cursor advances without firing a spurious '📎 try resending' ack
+    hours after any real activity. Sam reported this 2026-05-19."""
     db = _make_chatdb(tmp_path)
     _insert_message(
         db, rowid=1, handle="+15551234567", text="￼",  # OBJECT REPLACEMENT only
         cache_has_attachments=1,
     )
+    # No attachment row inserted — path resolution returns ()
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     assert len(msgs) == 1
-    assert msgs[0].has_attachment is True
-    assert msgs[0].body == ""  # U+FFFC stripped → empty
+    assert msgs[0].sender_handle == "<empty-skip>"
+    assert msgs[0].has_attachment is False
+    assert msgs[0].attachment_paths == ()
+
+
+def test_reader_image_only_with_resolved_path_surfaces_normally(
+    tmp_path: Path, monkeypatch,
+):
+    """The legit case: attachment row exists, file is on disk and inside
+    the attachment root, body is image-only (just U+FFFC). Surface with
+    real sender so the daemon can hand the path to claude."""
+    db = _make_chatdb(tmp_path)
+    fake_root = tmp_path / "Attachments"
+    fake_root.mkdir()
+    img_path = fake_root / "IMG_0001.jpeg"
+    img_path.write_bytes(b"\xff\xd8\xff\xe0fakejpg")
+    monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
+    _insert_message(
+        db, rowid=1, handle="+15551234567", text="￼",
+        cache_has_attachments=1,
+    )
+    _insert_attachment(db, message_rowid=1, filename=str(img_path))
+
+    msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
+    assert len(msgs) == 1
     assert msgs[0].sender_handle == "+15551234567"
+    assert msgs[0].has_attachment is True
+    assert msgs[0].attachment_paths == (str(img_path),)
+    assert msgs[0].body == ""
 
 
 def test_reader_image_with_caption_strips_object_replacement(tmp_path: Path):

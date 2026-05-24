@@ -656,33 +656,52 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     # any local image. Requires Read in allowed_tools (trust=full has
     # it by default via the user's config).
     #
-    # The augmentation is injected only at this layer; nothing about
-    # msg itself is mutated. If no paths resolved (e.g. file was
-    # purged before we got to it), we still bail with a short note so
-    # the user doesn't get silence.
-    if msg.has_attachment:
-        if not msg.attachment_paths:
-            no_path_body = (
-                "📎 I see you sent an attachment but the file isn't "
-                "available yet. Try resending in a moment."
+    # Three sub-cases:
+    #   (a) has_attachment + resolved path(s)  → augment prompt with
+    #       paths, fall through to the normal claude call.
+    #   (b) has_attachment + NO paths + has caption → drop the attachment
+    #       silently and process the caption as plain text. Don't waste
+    #       a reply complaining about the missing file; the caption is
+    #       what the user wanted answered.
+    #   (c) has_attachment + NO paths + NO caption → silent drop.
+    #       Almost certainly an iCloud sync artifact (link preview meta,
+    #       audio-message meta, delayed echo of an old outbound) that
+    #       Apple's chat.db routinely back-fills with
+    #       cache_has_attachments=1 hours after the fact. Sam reported
+    #       spontaneous "📎 try resending" acks fired hours after any
+    #       real activity (2026-05-19). The reader's empty-skip path
+    #       catches this too — the daemon-side check is defense in depth.
+    if msg.has_attachment and not msg.attachment_paths:
+        caption = msg.body.strip()
+        if not caption:
+            _metrics["attachment_phantom_dropped"] += 1
+            state.audit(
+                handle_redacted=redacted, direction="in", kind="drop",
+                detail="attachment-phantom-silent",
+                chatdb_rowid=msg.rowid,
             )
-            try:
-                imessage_sender.send(
-                    imessage_sender.SendRequest(handle=norm, body=no_path_body),
-                    dry_run=False,
-                )
-                _record_self_send(norm, no_path_body)
-                _metrics["attachment_no_path"] += 1
-                state.audit(
-                    handle_redacted=redacted, direction="out", kind="ack",
-                    detail="attachment-no-path",
-                    reply_bytes=len(no_path_body.encode("utf-8")),
-                    chatdb_rowid=msg.rowid,
-                )
-            except imessage_sender.SendError as e:
-                _metrics["send_errors"] += 1
-                logger.error("attachment-no-path send failed: %s", e)
             return
+        # Caption survives, attachment dropped. Re-emit msg without the
+        # attachment markers so the downstream code path treats it as
+        # plain text. The original chatdb_rowid is preserved for audit.
+        logger.info(
+            "attachment had no resolvable path; processing caption only "
+            "for %s (rowid=%d)", redacted, msg.rowid,
+        )
+        _metrics["attachment_no_path_fallback_to_text"] += 1
+        msg = imessage_reader.Message(
+            rowid=msg.rowid,
+            chat_guid=msg.chat_guid,
+            is_group=msg.is_group,
+            sender_handle=msg.sender_handle,
+            timestamp_iso=msg.timestamp_iso,
+            body=caption,
+            body_truncated=msg.body_truncated,
+            parse_warning=msg.parse_warning,
+            has_attachment=False,
+            attachment_paths=(),
+        )
+    elif msg.has_attachment:
         # Build an augmented prompt. The caption (if any) becomes the
         # user-intent text; the paths become an instruction block for
         # claude. Claude is told explicitly that the paths point to

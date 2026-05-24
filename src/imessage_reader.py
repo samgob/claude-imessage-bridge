@@ -327,16 +327,23 @@ def fetch_new_messages(
                 attachment_paths = _resolve_attachment_paths(
                     conn, int(row["rowid"]),
                 )
-            # Cursor-advance-on-skip: rows yield as empty-skip ONLY
-            # when there's nothing the daemon could possibly respond to:
-            # no sender, OR (no body AND no attachment marker). When
-            # has_attachment=True we ALWAYS surface with the real sender
-            # so the daemon can send a "no-path / try again" reply even
-            # if attachment path resolution failed (iCloud download
-            # race, missing file, etc.).
-            if (not sender) or (
-                (not body.strip()) and not has_attachment
-            ):
+            # Cursor-advance-on-skip: yield as empty-skip when there's
+            # nothing actionable. Three skip conditions:
+            #   1. No sender (defensive)
+            #   2. No body AND no attachment marker — nothing to respond to
+            #   3. has_attachment=True BUT no resolved paths AND no caption —
+            #      almost always an iCloud sync artifact (link previews,
+            #      audio-message metadata, delayed echo of an earlier
+            #      outbound). Sam saw spontaneous "📎 try resending" acks
+            #      fire hours after any real message activity (2026-05-19).
+            #      We silently advance the cursor instead of pestering the
+            #      user. If a real image was just slow to download, the
+            #      user re-sends — that's the right cost/UX tradeoff.
+            no_actionable_content = (
+                (not body.strip())
+                and (not has_attachment or not attachment_paths)
+            )
+            if (not sender) or no_actionable_content:
                 yield Message(
                     rowid=int(row["rowid"]),
                     chat_guid=row["chat_guid"] or "",
@@ -346,7 +353,10 @@ def fetch_new_messages(
                     body="",
                     body_truncated=False,
                     parse_warning=warning,
-                    has_attachment=has_attachment,
+                    # Clear has_attachment on skip-yields so a downstream
+                    # consumer that ignores sender_handle can't accidentally
+                    # hit the attachment branch.
+                    has_attachment=False,
                     attachment_paths=(),
                 )
                 continue
