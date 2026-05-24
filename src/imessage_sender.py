@@ -50,27 +50,31 @@ MAX_REPLY_BYTES: Final = 8000
 #      detector — same characters at runtime, safer source;
 #   2. a code reviewer scanning the file in a non-BiDi-aware editor
 #      sees the codepoints explicitly.
-_BIDI_CHARS: Final = "".join(chr(c) for c in (
-    0x202A,  # LRE   LEFT-TO-RIGHT EMBEDDING
-    0x202B,  # RLE   RIGHT-TO-LEFT EMBEDDING
-    0x202C,  # PDF   POP DIRECTIONAL FORMATTING
-    0x202D,  # LRO   LEFT-TO-RIGHT OVERRIDE
-    0x202E,  # RLO   RIGHT-TO-LEFT OVERRIDE
-    0x2066,  # LRI   LEFT-TO-RIGHT ISOLATE
-    0x2067,  # RLI   RIGHT-TO-LEFT ISOLATE
-    0x2068,  # FSI   FIRST STRONG ISOLATE
-    0x2069,  # PDI   POP DIRECTIONAL ISOLATE
-))
-_ZERO_WIDTH_CHARS: Final = "".join(chr(c) for c in (
-    0x200B,  # ZWSP  ZERO WIDTH SPACE
-    0x200C,  # ZWNJ  ZERO WIDTH NON-JOINER
-    0x200D,  # ZWJ   ZERO WIDTH JOINER
-    0x2060,  # WJ    WORD JOINER
-    0xFEFF,  # BOM / ZERO WIDTH NO-BREAK SPACE
-))
-_DISPLAY_ATTACK_TABLE: Final = str.maketrans(
-    "", "", _BIDI_CHARS + _ZERO_WIDTH_CHARS
+_BIDI_CHARS: Final = "".join(
+    chr(c)
+    for c in (
+        0x202A,  # LRE   LEFT-TO-RIGHT EMBEDDING
+        0x202B,  # RLE   RIGHT-TO-LEFT EMBEDDING
+        0x202C,  # PDF   POP DIRECTIONAL FORMATTING
+        0x202D,  # LRO   LEFT-TO-RIGHT OVERRIDE
+        0x202E,  # RLO   RIGHT-TO-LEFT OVERRIDE
+        0x2066,  # LRI   LEFT-TO-RIGHT ISOLATE
+        0x2067,  # RLI   RIGHT-TO-LEFT ISOLATE
+        0x2068,  # FSI   FIRST STRONG ISOLATE
+        0x2069,  # PDI   POP DIRECTIONAL ISOLATE
+    )
 )
+_ZERO_WIDTH_CHARS: Final = "".join(
+    chr(c)
+    for c in (
+        0x200B,  # ZWSP  ZERO WIDTH SPACE
+        0x200C,  # ZWNJ  ZERO WIDTH NON-JOINER
+        0x200D,  # ZWJ   ZERO WIDTH JOINER
+        0x2060,  # WJ    WORD JOINER
+        0xFEFF,  # BOM / ZERO WIDTH NO-BREAK SPACE
+    )
+)
+_DISPLAY_ATTACK_TABLE: Final = str.maketrans("", "", _BIDI_CHARS + _ZERO_WIDTH_CHARS)
 
 
 def _strip_display_attacks(body: str) -> str:
@@ -112,8 +116,8 @@ class SendError(RuntimeError):
 
 @dataclass(frozen=True)
 class SendRequest:
-    handle: str       # validated by validate_handle() before construction
-    body: str         # capped at MAX_REPLY_BYTES; may be truncated
+    handle: str  # validated by validate_handle() before construction
+    body: str  # capped at MAX_REPLY_BYTES; may be truncated
 
 
 def validate_handle(handle: str) -> str:
@@ -157,7 +161,7 @@ _OSASCRIPT_BIN: Final = "/usr/bin/osascript"
 # NSStrings — no shell, no ``do shell script``, no Mac-Roman conversion
 # (which is what ``do shell script "cat"`` would impose). This is the
 # correct shape for safe + encoding-correct send.
-_APPLESCRIPT: Final = r'''
+_APPLESCRIPT: Final = r"""
 on run argv
     set targetHandle to item 1 of argv
     set messageText to item 2 of argv
@@ -167,7 +171,7 @@ on run argv
         send messageText to targetBuddy
     end tell
 end run
-'''
+"""
 
 
 def send(request: SendRequest, *, dry_run: bool = False) -> None:
@@ -187,8 +191,9 @@ def send(request: SendRequest, *, dry_run: bool = False) -> None:
         return
 
     if dry_run:
-        logger.info("DRY RUN — would send %d bytes to %s",
-                    len(body.encode("utf-8")), _redact_handle(handle))
+        logger.info(
+            "DRY RUN — would send %d bytes to %s", len(body.encode("utf-8")), _redact_handle(handle)
+        )
         return
 
     # ``osascript -e SCRIPT -- ARG1 ARG2`` passes ARG1/ARG2 to the script's

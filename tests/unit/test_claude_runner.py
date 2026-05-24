@@ -21,6 +21,7 @@ from src import claude_runner, trust
 
 # --- _validate_tool_list / HARD_FORBIDDEN_TOOLS --------------------------
 
+
 def test_validate_tool_list_accepts_empty():
     claude_runner._validate_tool_list([])  # must not raise
 
@@ -49,6 +50,7 @@ def test_validate_tool_list_rejects_mcp_namespaced():
 
 # --- _assert_safe_argv ---------------------------------------------------
 
+
 def test_assert_safe_argv_rejects_dangerously_skip_permissions():
     argv = ["/usr/local/bin/claude", "-p", "--dangerously-skip-permissions"]
     with pytest.raises(claude_runner.RunnerConfigError):
@@ -71,11 +73,15 @@ def test_assert_safe_argv_rejects_permission_mode_bypass():
 
 def test_assert_safe_argv_accepts_normal_argv():
     argv = [
-        "/usr/local/bin/claude", "-p",
-        "--output-format", "json",
+        "/usr/local/bin/claude",
+        "-p",
+        "--output-format",
+        "json",
         "--strict-mcp-config",
-        "--disallowed-tools", "Bash,Write",
-        "--", "hello",
+        "--disallowed-tools",
+        "Bash,Write",
+        "--",
+        "hello",
     ]
     claude_runner._assert_safe_argv(argv)  # must not raise
 
@@ -91,8 +97,10 @@ def test_assert_safe_argv_rejects_missing_double_dash():
     claude's CLI parser. Defense in depth — code always builds with
     '--', this check catches future regressions."""
     argv = [
-        "/usr/local/bin/claude", "-p",
-        "--output-format", "json",
+        "/usr/local/bin/claude",
+        "-p",
+        "--output-format",
+        "json",
         "hello",  # prompt, but no '--' before it
     ]
     with pytest.raises(claude_runner.RunnerConfigError, match="'--' separator"):
@@ -104,8 +112,11 @@ def test_assert_safe_argv_rejects_double_dash_not_at_end():
     (the prompt). A '--' followed by more flags / positionals is
     structurally wrong."""
     argv = [
-        "/usr/local/bin/claude", "-p",
-        "--", "hello", "extra",  # extra positional after the prompt
+        "/usr/local/bin/claude",
+        "-p",
+        "--",
+        "hello",
+        "extra",  # extra positional after the prompt
     ]
     with pytest.raises(claude_runner.RunnerConfigError, match="immediately precede"):
         claude_runner._assert_safe_argv(argv)
@@ -114,14 +125,18 @@ def test_assert_safe_argv_rejects_double_dash_not_at_end():
 def test_assert_safe_argv_rejects_trailing_double_dash():
     """'--' at the very end (no prompt after) is also wrong."""
     argv = [
-        "/usr/local/bin/claude", "-p",
-        "--output-format", "json", "--",
+        "/usr/local/bin/claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--",
     ]
     with pytest.raises(claude_runner.RunnerConfigError, match="immediately precede"):
         claude_runner._assert_safe_argv(argv)
 
 
 # --- _scrubbed_env -------------------------------------------------------
+
 
 def test_scrubbed_env_only_allowlisted_keys(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
@@ -154,6 +169,7 @@ def test_scrubbed_env_passes_oauth_token(monkeypatch):
 
 # --- _write_empty_mcp_safe ----------------------------------------------
 
+
 def test_write_empty_mcp_safe_creates_file_with_tight_perms(tmp_path: Path):
     target = tmp_path / "empty-mcp.json"
     claude_runner._write_empty_mcp_safe(target)
@@ -183,6 +199,7 @@ def test_write_empty_mcp_safe_refuses_symlink(tmp_path: Path):
 
 # --- run_claude argv shape (with mocked Popen) --------------------------
 
+
 class _FakeProc:
     """Minimal subprocess.Popen substitute for argv-capture tests."""
 
@@ -208,20 +225,18 @@ def captured_argv(monkeypatch, fake_claude_binary):
     def fake_popen(argv, **kwargs):
         holder["argv"] = list(argv)
         holder["kwargs"] = kwargs
-        return _FakeProc(
-            {"result": "hi", "session_id": "abc-123", "total_cost_usd": 0.005}
-        )
+        return _FakeProc({"result": "hi", "session_id": "abc-123", "total_cost_usd": 0.005})
 
     monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
     return holder
 
 
-def test_run_claude_argv_includes_strict_mcp_and_disallow(
-    captured_argv, fake_claude_binary
-):
+def test_run_claude_argv_includes_strict_mcp_and_disallow(captured_argv, fake_claude_binary):
     result = claude_runner.run_claude(
         "hello",
-        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
     )
     assert result.success
@@ -238,7 +253,9 @@ def test_run_claude_argv_includes_strict_mcp_and_disallow(
 def test_run_claude_argv_has_double_dash_separator(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
         "hello --not-a-flag",
-        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
@@ -247,13 +264,13 @@ def test_run_claude_argv_has_double_dash_separator(captured_argv, fake_claude_bi
     assert argv[-1] == "hello --not-a-flag"
 
 
-def test_run_claude_argv_appends_resume_when_session_given(
-    captured_argv, fake_claude_binary
-):
+def test_run_claude_argv_appends_resume_when_session_given(captured_argv, fake_claude_binary):
     sid = "8859efe4-1234-4abc-9def-abcdef012345"
     claude_runner.run_claude(
         "hello",
-        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
         resume_session_id=sid,
     )
@@ -264,21 +281,24 @@ def test_run_claude_argv_appends_resume_when_session_given(
 
 # --- session_id format validator -----------------------------------------
 
+
 def test_validate_session_id_accepts_uuid():
     sid = "8859efe4-1234-5678-9abc-def012345678"
     assert claude_runner._validate_session_id(sid) == sid
 
 
 def test_validate_session_id_lowercases_input():
-    assert claude_runner._validate_session_id(
-        "8859EFE4-1234-5678-9ABC-DEF012345678"
-    ) == "8859efe4-1234-5678-9abc-def012345678"
+    assert (
+        claude_runner._validate_session_id("8859EFE4-1234-5678-9ABC-DEF012345678")
+        == "8859efe4-1234-5678-9abc-def012345678"
+    )
 
 
 def test_validate_session_id_strips_whitespace():
-    assert claude_runner._validate_session_id(
-        "  8859efe4-1234-5678-9abc-def012345678  "
-    ) == "8859efe4-1234-5678-9abc-def012345678"
+    assert (
+        claude_runner._validate_session_id("  8859efe4-1234-5678-9abc-def012345678  ")
+        == "8859efe4-1234-5678-9abc-def012345678"
+    )
 
 
 def test_validate_session_id_rejects_flag_lookalike():
@@ -312,7 +332,8 @@ def test_validate_session_id_rejects_non_string():
 
 
 def test_run_claude_rejects_malformed_resume_session_id(
-    captured_argv, fake_claude_binary,
+    captured_argv,
+    fake_claude_binary,
 ):
     """The argv-build path validates session_id — a malformed value
     raises RunnerConfigError instead of being inserted into argv."""
@@ -327,12 +348,12 @@ def test_run_claude_rejects_malformed_resume_session_id(
         )
 
 
-def test_run_claude_argv_no_resume_when_session_none(
-    captured_argv, fake_claude_binary
-):
+def test_run_claude_argv_no_resume_when_session_none(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
         "hello",
-        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
         resume_session_id=None,
     )
@@ -367,12 +388,12 @@ def test_run_claude_argv_max_turns_full_preset(captured_argv, fake_claude_binary
     assert argv[argv.index("--max-turns") + 1] == "20"
 
 
-def test_run_claude_argv_includes_anti_fabrication_prompt(
-    captured_argv, fake_claude_binary
-):
+def test_run_claude_argv_includes_anti_fabrication_prompt(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
         "hello",
-        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
         claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
@@ -384,13 +405,13 @@ def test_run_claude_argv_includes_anti_fabrication_prompt(
     assert "Do NOT fabricate tool calls" in prompt
 
 
-def test_run_claude_argv_allowed_tools_filters_disallow(
-    captured_argv, fake_claude_binary
-):
+def test_run_claude_argv_allowed_tools_filters_disallow(captured_argv, fake_claude_binary):
     """If the user opts into Read, it must NOT appear in --disallowed-tools."""
     claude_runner.run_claude(
         "hello",
-        trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=["Read"],
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=["Read"],
         claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
@@ -404,7 +425,11 @@ def test_run_claude_argv_allowed_tools_filters_disallow(
 
 def test_run_claude_argv_no_dangerous_flags(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
-        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hello",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
     for bad in claude_runner.ARGV_DENYLIST:
@@ -413,7 +438,11 @@ def test_run_claude_argv_no_dangerous_flags(captured_argv, fake_claude_binary):
 
 def test_run_claude_argv_mcp_config_in_sandbox(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
-        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hello",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     argv = captured_argv["argv"]
     assert "--mcp-config" in argv
@@ -425,7 +454,11 @@ def test_run_claude_argv_mcp_config_in_sandbox(captured_argv, fake_claude_binary
 
 def test_run_claude_argv_cwd_is_sandbox(captured_argv, fake_claude_binary):
     claude_runner.run_claude(
-        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hello",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     cwd = captured_argv["kwargs"]["cwd"]
     # cwd must be the per-call sandbox tempdir, NOT user's project_directory
@@ -437,7 +470,11 @@ def test_run_claude_argv_cwd_is_sandbox(captured_argv, fake_claude_binary):
 def test_run_claude_spawns_with_new_session(captured_argv, fake_claude_binary):
     """``start_new_session=True`` is required for process-group kill."""
     claude_runner.run_claude(
-        "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hello",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     assert captured_argv["kwargs"]["start_new_session"] is True
 
@@ -445,7 +482,10 @@ def test_run_claude_spawns_with_new_session(captured_argv, fake_claude_binary):
 def test_run_claude_rejects_forbidden_tool_in_allowed_list(fake_claude_binary):
     with pytest.raises(claude_runner.RunnerConfigError):
         claude_runner.run_claude(
-            "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=["Bash"],
+            "hello",
+            trust_preset=trust.PRESET_CHAT_ONLY,
+            project_directory=Path("/tmp"),
+            allowed_tools_addons=["Bash"],
             claude_bin=str(fake_claude_binary),
         )
 
@@ -453,7 +493,10 @@ def test_run_claude_rejects_forbidden_tool_in_allowed_list(fake_claude_binary):
 def test_run_claude_rejects_missing_binary(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         claude_runner.run_claude(
-            "hello", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[],
+            "hello",
+            trust_preset=trust.PRESET_CHAT_ONLY,
+            project_directory=Path("/tmp"),
+            allowed_tools_addons=[],
             claude_bin=str(tmp_path / "nope"),
         )
 
@@ -469,7 +512,11 @@ def test_run_claude_caps_prompt_length(monkeypatch, fake_claude_binary):
     # 64 KB prompt — well over the 32 KB cap
     big_prompt = "A" * (64 * 1024)
     claude_runner.run_claude(
-        big_prompt, trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        big_prompt,
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     sent = holder["argv"][-1]
     assert len(sent.encode("utf-8")) <= claude_runner.MAX_PROMPT_BYTES
@@ -477,17 +524,25 @@ def test_run_claude_caps_prompt_length(monkeypatch, fake_claude_binary):
 
 # --- run_claude result parsing ------------------------------------------
 
+
 def test_run_claude_returns_session_id_and_cost(monkeypatch, fake_claude_binary):
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen",
-        lambda argv, **kw: _FakeProc({
-            "result": "hello!",
-            "session_id": "sess-12345",
-            "total_cost_usd": 0.0432,
-        }),
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: _FakeProc(
+            {
+                "result": "hello!",
+                "session_id": "sess-12345",
+                "total_cost_usd": 0.0432,
+            }
+        ),
     )
     r = claude_runner.run_claude(
-        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     assert r.success
     assert r.reply == "hello!"
@@ -498,11 +553,16 @@ def test_run_claude_returns_session_id_and_cost(monkeypatch, fake_claude_binary)
 
 def test_run_claude_handles_is_error_response(monkeypatch, fake_claude_binary):
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen",
+        claude_runner.subprocess,
+        "Popen",
         lambda argv, **kw: _FakeProc({"is_error": True, "subtype": "rate_limit"}),
     )
     r = claude_runner.run_claude(
-        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     assert not r.success
     assert r.error_category == "claude_error"
@@ -514,10 +574,16 @@ def test_run_claude_handles_non_zero_exit(monkeypatch, fake_claude_binary):
     proc._stdout = b""
     proc._stderr = b"some internal error path /Users/x/.claude/oops"
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: proc,
     )
     r = claude_runner.run_claude(
-        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     assert not r.success
     assert r.error_category == "exec_error"
@@ -533,11 +599,12 @@ def test_run_claude_detects_stale_session_resume(monkeypatch, fake_claude_binary
     proc = _FakeProc({}, returncode=1)
     proc._stdout = b""
     proc._stderr = (
-        b"No conversation found with session ID: "
-        b"eff33daf-1ae1-422a-b291-9cd8bac21c8d\n"
+        b"No conversation found with session ID: " b"eff33daf-1ae1-422a-b291-9cd8bac21c8d\n"
     )
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: proc,
     )
     r = claude_runner.run_claude(
         "hi",
@@ -558,17 +625,22 @@ def test_run_claude_extracts_permission_denials(monkeypatch, fake_claude_binary)
     """When claude reports permission_denials in its JSON, the runner
     extracts them into ClaudeResult so the daemon can act."""
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen",
-        lambda argv, **kw: _FakeProc({
-            "result": "I tried to edit CLAUDE.md but was blocked.",
-            "session_id": "sess-abc",
-            "total_cost_usd": 0.05,
-            "permission_denials": [
-                {"tool_name": "Edit",
-                 "tool_input": {"file_path": "/Users/sam/.claude/CLAUDE.md"}},
-            ],
-            "is_error": False,
-        }),
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: _FakeProc(
+            {
+                "result": "I tried to edit CLAUDE.md but was blocked.",
+                "session_id": "sess-abc",
+                "total_cost_usd": 0.05,
+                "permission_denials": [
+                    {
+                        "tool_name": "Edit",
+                        "tool_input": {"file_path": "/Users/sam/.claude/CLAUDE.md"},
+                    },
+                ],
+                "is_error": False,
+            }
+        ),
     )
     r = claude_runner.run_claude(
         "update memory",
@@ -585,12 +657,15 @@ def test_run_claude_extracts_permission_denials(monkeypatch, fake_claude_binary)
 def test_run_claude_empty_permission_denials_default(monkeypatch, fake_claude_binary):
     """A normal success with no denials reports an empty list (not None)."""
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen",
-        lambda argv, **kw: _FakeProc({
-            "result": "ok",
-            "session_id": "sess-abc",
-            "total_cost_usd": 0.01,
-        }),
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: _FakeProc(
+            {
+                "result": "ok",
+                "session_id": "sess-abc",
+                "total_cost_usd": 0.01,
+            }
+        ),
     )
     r = claude_runner.run_claude(
         "hi",
@@ -672,6 +747,7 @@ def test_run_claude_accept_edits_with_protected_files_emits_deny_settings(
     CLAUDE.md edits should require explicit approval (relay flow) even though
     everything else is acceptEdits-auto-accepted."""
     import json
+
     holder = {}
 
     def fake_popen(argv, **kwargs):
@@ -769,7 +845,9 @@ def test_run_claude_resume_missing_only_fires_with_resume_arg(monkeypatch, fake_
     proc._stdout = b""
     proc._stderr = b"No conversation found with session ID: anything\n"
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: proc,
     )
     r = claude_runner.run_claude(
         "hi",
@@ -787,10 +865,16 @@ def test_run_claude_handles_malformed_json(monkeypatch, fake_claude_binary):
     proc = _FakeProc({})
     proc._stdout = b"not json at all"
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen", lambda argv, **kw: proc,
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: proc,
     )
     r = claude_runner.run_claude(
-        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     assert not r.success
     assert r.error_category == "json_parse"
@@ -806,12 +890,18 @@ def test_run_claude_handles_timeout(monkeypatch, fake_claude_binary):
             raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout or 0)
 
     monkeypatch.setattr(
-        claude_runner.subprocess, "Popen", lambda argv, **kw: _SlowProc(),
+        claude_runner.subprocess,
+        "Popen",
+        lambda argv, **kw: _SlowProc(),
     )
     # _kill_process_group will try os.getpgid on a likely-nonexistent pid;
     # that should be silently swallowed.
     r = claude_runner.run_claude(
-        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
         timeout_seconds=1,
     )
     assert not r.success
@@ -819,6 +909,7 @@ def test_run_claude_handles_timeout(monkeypatch, fake_claude_binary):
 
 
 # --- HARD_DISALLOWED coverage --------------------------------------------
+
 
 def test_hard_disallowed_exact_snapshot():
     """Snapshot of HARD_DISALLOWED. Any addition or removal must update
@@ -829,25 +920,50 @@ def test_hard_disallowed_exact_snapshot():
     EnterPlanMode, ExitPlanMode, AskUserQuestion) — a regression that
     removed them would have passed silently.
     """
-    expected = frozenset({
-        # Filesystem write/exec
-        "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-        # Filesystem read
-        "Read", "Grep", "Glob", "LS", "NotebookRead",
-        # Network egress
-        "WebFetch", "WebSearch",
-        # Tool/skill/agent loading
-        "Skill", "Agent", "ToolSearch",
-        # Scheduling
-        "CronCreate", "CronDelete", "CronList", "CronToggle", "ScheduleWakeup",
-        # Communication / out-of-band
-        "AskUserQuestion", "RemoteTrigger", "PushNotification",
-        # Task / state / plan
-        "TodoWrite", "TaskStop", "TaskOutput",
-        "EnterWorktree", "ExitWorktree", "EnterPlanMode", "ExitPlanMode",
-        # MCP introspection
-        "ListMcpResourcesTool", "ReadMcpResourceTool",
-    })
+    expected = frozenset(
+        {
+            # Filesystem write/exec
+            "Bash",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            # Filesystem read
+            "Read",
+            "Grep",
+            "Glob",
+            "LS",
+            "NotebookRead",
+            # Network egress
+            "WebFetch",
+            "WebSearch",
+            # Tool/skill/agent loading
+            "Skill",
+            "Agent",
+            "ToolSearch",
+            # Scheduling
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "CronToggle",
+            "ScheduleWakeup",
+            # Communication / out-of-band
+            "AskUserQuestion",
+            "RemoteTrigger",
+            "PushNotification",
+            # Task / state / plan
+            "TodoWrite",
+            "TaskStop",
+            "TaskOutput",
+            "EnterWorktree",
+            "ExitWorktree",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            # MCP introspection
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+        }
+    )
     actual = frozenset(claude_runner.HARD_DISALLOWED)
     added = actual - expected
     removed = expected - actual
@@ -865,12 +981,11 @@ def test_hard_forbidden_subset_of_hard_disallowed():
     MCP-namespaced tools, which aren't enumerable in HARD_DISALLOWED.
     """
     leaks = claude_runner.HARD_FORBIDDEN_TOOLS - claude_runner.HARD_DISALLOWED
-    assert not leaks, (
-        f"HARD_FORBIDDEN_TOOLS leak — forbidden but not denied: {sorted(leaks)}"
-    )
+    assert not leaks, f"HARD_FORBIDDEN_TOOLS leak — forbidden but not denied: {sorted(leaks)}"
 
 
 # --- _encode_cwd_for_projects / _cleanup_sandbox_session -----------------
+
 
 def test_encode_cwd_for_projects_replaces_slashes():
     """Claude's encoding turns / into - in the projects/ subdir name."""
@@ -882,9 +997,7 @@ def test_encode_cwd_for_projects_replaces_slashes():
 
 def test_encode_cwd_for_projects_replaces_spaces():
     """Spaces also become - in Claude's encoding (lossy)."""
-    encoded = claude_runner._encode_cwd_for_projects(
-        Path("/Users/me/Desktop/With Spaces")
-    )
+    encoded = claude_runner._encode_cwd_for_projects(Path("/Users/me/Desktop/With Spaces"))
     assert encoded == "-Users-me-Desktop-With-Spaces"
 
 
@@ -901,7 +1014,9 @@ def test_cleanup_sandbox_session_removes_jsonl(tmp_path: Path):
     assert jsonl.exists()
 
     claude_runner._cleanup_sandbox_session(
-        sandbox_cwd, sid, projects_root=projects_root,
+        sandbox_cwd,
+        sid,
+        projects_root=projects_root,
     )
 
     assert not jsonl.exists()
@@ -917,7 +1032,9 @@ def test_cleanup_sandbox_session_silent_on_missing_file(tmp_path: Path):
     projects_root.mkdir()
     # Should not raise.
     claude_runner._cleanup_sandbox_session(
-        sandbox_cwd, sid, projects_root=projects_root,
+        sandbox_cwd,
+        sid,
+        projects_root=projects_root,
     )
 
 
@@ -927,10 +1044,14 @@ def test_cleanup_sandbox_session_skips_when_no_session_id(tmp_path: Path):
     projects_root = tmp_path / "projects"
     projects_root.mkdir()
     claude_runner._cleanup_sandbox_session(
-        sandbox_cwd, None, projects_root=projects_root,
+        sandbox_cwd,
+        None,
+        projects_root=projects_root,
     )
     claude_runner._cleanup_sandbox_session(
-        sandbox_cwd, "", projects_root=projects_root,
+        sandbox_cwd,
+        "",
+        projects_root=projects_root,
     )
 
 
@@ -944,10 +1065,14 @@ def test_cleanup_sandbox_session_refuses_path_traversal_sid(tmp_path: Path):
     # Even though no file matches these patterns under projects_root, the
     # check is that the function returns without touching disk.
     claude_runner._cleanup_sandbox_session(
-        sandbox_cwd, "../../../etc/passwd", projects_root=projects_root,
+        sandbox_cwd,
+        "../../../etc/passwd",
+        projects_root=projects_root,
     )
     claude_runner._cleanup_sandbox_session(
-        sandbox_cwd, "../victim", projects_root=projects_root,
+        sandbox_cwd,
+        "../victim",
+        projects_root=projects_root,
     )
     assert victim.read_text() == "DO NOT TOUCH"
 
@@ -969,16 +1094,23 @@ def test_run_claude_cleans_up_jsonl_after_call(monkeypatch, fake_claude_binary, 
         jsonl = d / "test-sid-9999.jsonl"
         jsonl.write_text('{"type":"user"}\n')
         holder["jsonl"] = jsonl
-        return _FakeProc({
-            "result": "hi", "session_id": "test-sid-9999",
-            "total_cost_usd": 0.001,
-        })
+        return _FakeProc(
+            {
+                "result": "hi",
+                "session_id": "test-sid-9999",
+                "total_cost_usd": 0.001,
+            }
+        )
 
     monkeypatch.setattr(claude_runner.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(claude_runner, "DEFAULT_PROJECTS_ROOT", fake_projects)
 
     r = claude_runner.run_claude(
-        "hi", trust_preset=trust.PRESET_CHAT_ONLY, project_directory=Path("/tmp"), allowed_tools_addons=[], claude_bin=str(fake_claude_binary),
+        "hi",
+        trust_preset=trust.PRESET_CHAT_ONLY,
+        project_directory=Path("/tmp"),
+        allowed_tools_addons=[],
+        claude_bin=str(fake_claude_binary),
     )
     assert r.success
     assert r.session_id == "test-sid-9999"

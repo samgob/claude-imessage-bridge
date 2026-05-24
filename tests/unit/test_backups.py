@@ -16,6 +16,7 @@ from src import backups, state
 
 # --- Helpers -------------------------------------------------------------
 
+
 class _FakeDT:
     """Pin datetime.now() to a fixed value for testing."""
 
@@ -42,6 +43,7 @@ def _reset_module_state():
 
 # --- _parse_backup_date ---------------------------------------------------
 
+
 def test_parse_backup_filename_db():
     assert backups._parse_backup_date("state-20260512.db") == _dt.date(2026, 5, 12)
 
@@ -59,6 +61,7 @@ def test_parse_backup_filename_rejects_unrelated():
 
 # --- run_if_due -----------------------------------------------------------
 
+
 def test_run_if_due_skips_before_backup_hour(state_dir: Path, monkeypatch):
     _reset_module_state()
     state.init_state_dir(state_dir)
@@ -67,8 +70,10 @@ def test_run_if_due_skips_before_backup_hour(state_dir: Path, monkeypatch):
 
     ran = backups.run_if_due(state_dir)
     assert ran is False
-    assert not (state_dir / backups.BACKUP_DIR_NAME).exists() or \
-        len(list((state_dir / backups.BACKUP_DIR_NAME).iterdir())) == 0
+    assert (
+        not (state_dir / backups.BACKUP_DIR_NAME).exists()
+        or len(list((state_dir / backups.BACKUP_DIR_NAME).iterdir())) == 0
+    )
 
 
 def test_run_if_due_creates_backup_after_hour(state_dir: Path, monkeypatch):
@@ -124,6 +129,7 @@ def test_run_if_due_missing_state_db_is_noop(state_dir: Path, monkeypatch):
 
 
 # --- compression + retention --------------------------------------------
+
 
 def test_compress_older_backups(state_dir: Path, monkeypatch):
     """Backups older than 3 days get gzipped."""

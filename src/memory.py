@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 # --- Public types ---------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class MemoryLoadResult:
     """What ``MemoryBackend.context_for`` returns.
@@ -53,8 +54,8 @@ class MemoryLoadResult:
     so the user can audit what got loaded).
     """
 
-    text: str                              # what gets injected via --append-system-prompt
-    sources: List[Tuple[str, int]]         # [(path_str, bytes_loaded), ...]
+    text: str  # what gets injected via --append-system-prompt
+    sources: List[Tuple[str, int]]  # [(path_str, bytes_loaded), ...]
 
 
 class MemoryBackend(Protocol):
@@ -69,6 +70,7 @@ EMPTY_RESULT: MemoryLoadResult = MemoryLoadResult(text="", sources=[])
 
 
 # --- NoneBackend ----------------------------------------------------------
+
 
 class NoneBackend:
     """Returns empty context for every query.
@@ -88,21 +90,63 @@ class NoneBackend:
 # loaded; the lazy resolver picks the top-N reference files by score.
 _DEFAULT_TOP_N_REFS: int = 3
 _MIN_TOKEN_LENGTH: int = 3
-_SCAN_HEADER_BYTES: int = 1024            # how many bytes from each candidate
-                                          # file to scan for the token-match
-_CACHE_TTL_SECONDS: int = 300             # 5-minute query result cache
+_SCAN_HEADER_BYTES: int = 1024  # how many bytes from each candidate
+# file to scan for the token-match
+_CACHE_TTL_SECONDS: int = 300  # 5-minute query result cache
 
 # Stopwords for tokenization. Match session_discovery's set so the same
 # tokens that get stripped in /use are stripped here too.
-_STOPWORDS = frozenset({
-    "a", "an", "the", "session", "sessions", "claude",
-    "for", "with", "about", "from", "in", "of", "on", "my",
-    "to", "and", "or", "is", "are", "was", "were", "be", "been",
-    "latest", "recent", "newest", "last", "yesterday", "today",
-    "what", "when", "where", "who", "whose", "how", "why",
-    "this", "that", "these", "those", "i", "me", "you", "your",
-    "do", "did", "does",
-})
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "session",
+        "sessions",
+        "claude",
+        "for",
+        "with",
+        "about",
+        "from",
+        "in",
+        "of",
+        "on",
+        "my",
+        "to",
+        "and",
+        "or",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "latest",
+        "recent",
+        "newest",
+        "last",
+        "yesterday",
+        "today",
+        "what",
+        "when",
+        "where",
+        "who",
+        "whose",
+        "how",
+        "why",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "me",
+        "you",
+        "your",
+        "do",
+        "did",
+        "does",
+    }
+)
 
 
 def _tokenize(query: str) -> List[str]:
@@ -169,9 +213,7 @@ class ClaudeMdBackend:
         self.root = Path(root).expanduser()
         self.follow_references = follow_references
         self.max_bytes = max_bytes
-        self._exclude_patterns: List[re.Pattern] = [
-            re.compile(p) for p in (exclude or [])
-        ]
+        self._exclude_patterns: List[re.Pattern] = [re.compile(p) for p in (exclude or [])]
         # Query-hash → (timestamp, MemoryLoadResult)
         self._cache: Dict[str, Tuple[float, MemoryLoadResult]] = {}
 
@@ -225,7 +267,8 @@ class ClaudeMdBackend:
             logger.warning(
                 "ClaudeMdBackend: root %s could not be read (%s); "
                 "memory backend will return empty context",
-                self.root, e,
+                self.root,
+                e,
             )
             return ("", 0)
         return (text, len(text.encode("utf-8")))
@@ -252,7 +295,7 @@ class ClaudeMdBackend:
             # Truncate if the eager core alone exceeds the budget — better
             # to lose the tail than to drop it entirely.
             if core_bytes > self.max_bytes:
-                truncated = core_text.encode("utf-8")[:self.max_bytes]
+                truncated = core_text.encode("utf-8")[: self.max_bytes]
                 core_text = truncated.decode("utf-8", errors="ignore") + "\n…[truncated]"
                 core_bytes = len(core_text.encode("utf-8"))
             body_parts.append(core_text)
@@ -282,7 +325,9 @@ class ClaudeMdBackend:
                     remaining = self.max_bytes - bytes_used
                     encoded = text.encode("utf-8")
                     if len(encoded) > remaining:
-                        text = encoded[:remaining].decode("utf-8", errors="ignore") + "\n…[truncated]"
+                        text = (
+                            encoded[:remaining].decode("utf-8", errors="ignore") + "\n…[truncated]"
+                        )
                     section = f"\n\n--- {path.name} ---\n{text}"
                     body_parts.append(section)
                     section_bytes = len(section.encode("utf-8"))
@@ -298,6 +343,7 @@ class ClaudeMdBackend:
 
 
 # --- CustomScriptBackend --------------------------------------------------
+
 
 class CustomScriptBackend:
     """Operator-provided script. stdin: query. stdout: context. Best-effort.
@@ -332,7 +378,9 @@ class CustomScriptBackend:
         if proc.returncode != 0:
             logger.warning(
                 "CustomScriptBackend %s exit=%d stderr=%r",
-                self.script, proc.returncode, (proc.stderr or b"")[-200:],
+                self.script,
+                proc.returncode,
+                (proc.stderr or b"")[-200:],
             )
             return EMPTY_RESULT
         try:
@@ -347,6 +395,7 @@ class CustomScriptBackend:
 
 
 # --- Backend factory ------------------------------------------------------
+
 
 def build_backend(
     *,

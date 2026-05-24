@@ -64,15 +64,12 @@ def write_status(
     try:
         payload: Dict[str, Any] = {
             "schema_version": STATUS_SCHEMA_VERSION,
-            "ts": datetime.now(timezone.utc)
-                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "pid": os.getpid(),
             "cursor": int(cursor),
             "paused": bool(paused),
             "stop_requested": bool(stop_requested),
-            "consecutive_failures": state.get_consecutive_failures(
-                state_dir=state_dir
-            ),
+            "consecutive_failures": state.get_consecutive_failures(state_dir=state_dir),
             "daily_cost_cents": state.today_cost_cents(state_dir=state_dir),
             "daily_cost_cap_cents": int(round(daily_cost_cap_usd * 100)),
             "schema_db_version": state.SCHEMA_VERSION,
@@ -84,7 +81,9 @@ def write_status(
         # ``delete=False`` so we can close+chmod+rename without the file
         # vanishing in our hands.
         fd, tmp = tempfile.mkstemp(
-            prefix=".status.", suffix=".tmp", dir=str(state_dir),
+            prefix=".status.",
+            suffix=".tmp",
+            dir=str(state_dir),
         )
         # Track whether the rename completed; if not, the tmp file is
         # garbage and we should remove it. Using ``try/finally`` here

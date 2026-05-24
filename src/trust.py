@@ -42,6 +42,7 @@ from . import claude_runner
 
 # --- Preset definition ----------------------------------------------------
 
+
 @dataclass(frozen=True)
 class TrustPreset:
     """How to invoke ``claude -p`` for one inbound message.
@@ -51,7 +52,7 @@ class TrustPreset:
     configurable-only-via-yaml presets).
     """
 
-    name: str                          # 'chat_only' | 'coding' | 'full'
+    name: str  # 'chat_only' | 'coding' | 'full'
 
     # Where the claude child process runs.
     #   'hermetic_tempdir' — fresh tempfile.TemporaryDirectory per call.
@@ -109,10 +110,20 @@ class TrustPreset:
 # (the user explicitly chose it for code work) but denies network egress and
 # MCP-namespaced tools (the empty MCP config also kills MCPs, but
 # defense-in-depth).
-_CODING_FILESYSTEM_TOOLS: FrozenSet[str] = frozenset({
-    "Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
-    "Grep", "Glob", "LS", "NotebookRead",
-})
+_CODING_FILESYSTEM_TOOLS: FrozenSet[str] = frozenset(
+    {
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "Grep",
+        "Glob",
+        "LS",
+        "NotebookRead",
+    }
+)
 
 
 PRESET_CHAT_ONLY: TrustPreset = TrustPreset(
@@ -160,12 +171,17 @@ PRESET_FULL: TrustPreset = TrustPreset(
     # MCP-prefixed env vars (Anthropic-provided OAuth tokens etc.) are
     # passed through pattern-matched at scrub time; here we list the
     # commonly-named singletons.
-    extra_env_passthrough=frozenset({
-        "GH_TOKEN", "GITHUB_TOKEN",
-        # Claude Code's official MCP servers use these:
-        "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
-        "SLACK_USER_TOKEN", "SLACK_BOT_TOKEN",
-    }),
+    extra_env_passthrough=frozenset(
+        {
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            # Claude Code's official MCP servers use these:
+            "GOOGLE_OAUTH_CLIENT_ID",
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+            "SLACK_USER_TOKEN",
+            "SLACK_BOT_TOKEN",
+        }
+    ),
 )
 
 
@@ -186,8 +202,7 @@ def get_preset(name: str) -> TrustPreset:
     """Look up a preset by canonical name. Raises ``UnknownTrustPreset``."""
     if name not in _PRESETS_BY_NAME:
         raise UnknownTrustPreset(
-            f"trust preset {name!r} is not one of "
-            f"{sorted(_PRESETS_BY_NAME)}"
+            f"trust preset {name!r} is not one of " f"{sorted(_PRESETS_BY_NAME)}"
         )
     return _PRESETS_BY_NAME[name]
 

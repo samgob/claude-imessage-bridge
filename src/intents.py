@@ -94,8 +94,7 @@ _INTENTS: List[dict] = [
         "command": "/new",
         "destructive": True,
         "paraphrase": (
-            "Start a fresh session (lose the current thread)? Reply "
-            "'yes' to confirm."
+            "Start a fresh session (lose the current thread)? Reply " "'yes' to confirm."
         ),
         "patterns": [
             r"\b(reset|clear|forget|new)\b.*\b(session|context|chat|conversation|thread)\b",
@@ -104,7 +103,6 @@ _INTENTS: List[dict] = [
             r"\bclean slate\b",
         ],
     },
-
     # --- Restorative: light/no confirmation ----------------------------
     {
         "command": "/resume",
@@ -117,7 +115,6 @@ _INTENTS: List[dict] = [
             r"^\s*resume\s*$",
         ],
     },
-
     # --- Read-only: execute immediately, no confirmation ---------------
     {
         "command": "/status",
@@ -214,14 +211,16 @@ _INTENTS: List[dict] = [
 _COMPILED: List[tuple] = []
 for entry in _INTENTS:
     for pat in entry["patterns"]:
-        _COMPILED.append((
-            re.compile(pat, re.IGNORECASE),
-            IntentMatch(
-                command=entry["command"],
-                destructive=entry["destructive"],
-                paraphrase=entry["paraphrase"],
-            ),
-        ))
+        _COMPILED.append(
+            (
+                re.compile(pat, re.IGNORECASE),
+                IntentMatch(
+                    command=entry["command"],
+                    destructive=entry["destructive"],
+                    paraphrase=entry["paraphrase"],
+                ),
+            )
+        )
 
 
 def classify_intent(body: str) -> Optional[IntentMatch]:
@@ -246,7 +245,8 @@ def classify_intent(body: str) -> Optional[IntentMatch]:
 # the user knows the dialect and wants to skip the natural-language
 # routing on the second message.
 _YES_PATTERNS: List[re.Pattern] = [
-    re.compile(p, re.IGNORECASE) for p in [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"^\s*y(es)?\s*[!.]?\s*$",
         r"^\s*confirm\b",
         r"^\s*go ahead\b",
@@ -261,7 +261,8 @@ _YES_PATTERNS: List[re.Pattern] = [
 
 # "No" patterns: explicit cancellations.
 _NO_PATTERNS: List[re.Pattern] = [
-    re.compile(p, re.IGNORECASE) for p in [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"^\s*n(o)?\s*[!.]?\s*$",
         r"^\s*nope\s*[!.]?\s*$",
         r"^\s*cancel\b",

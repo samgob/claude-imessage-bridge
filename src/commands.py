@@ -67,9 +67,7 @@ def parse_and_dispatch(
         aliases = {}
     text = body.strip()
     if not text.startswith("/"):
-        return CommandResult(
-            reply="(internal error: parse_and_dispatch called on non-command)"
-        )
+        return CommandResult(reply="(internal error: parse_and_dispatch called on non-command)")
     parts = text.split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
@@ -96,7 +94,10 @@ def parse_and_dispatch(
         return _cost_today(state_dir=state_dir, cfg=cfg)
     if cmd == "/whoami":
         return _whoami(
-            handle=handle, state_dir=state_dir, aliases=aliases, cfg=cfg,
+            handle=handle,
+            state_dir=state_dir,
+            aliases=aliases,
+            cfg=cfg,
         )
     if cmd == "/tail-audit":
         return _tail_audit(state_dir=state_dir, raw_arg=arg)
@@ -108,36 +109,37 @@ def parse_and_dispatch(
         return _halt()
     return CommandResult(
         reply=(
-            f"Unknown command {cmd!r}. Try /help for the list, or send a "
-            "plain message to chat."
+            f"Unknown command {cmd!r}. Try /help for the list, or send a " "plain message to chat."
         )
     )
 
 
 def _help() -> CommandResult:
-    return CommandResult(reply=(
-        "Commands:\n"
-        "/help — this list\n"
-        "/new — start a fresh session\n"
-        "/status — current session info\n"
-        "/sessions — list recent sessions (numbered)\n"
-        "/use <query> — alias or keyword search; resumes a session\n"
-        "/pick <N> — switch to a numbered match from the last list\n"
-        "/aliases — list configured session aliases\n"
-        "/pause [reason] — pause the bridge (Claude calls suspended)\n"
-        "/resume — resume the bridge\n"
-        "/halt — exit the daemon (requires Terminal to restart)\n"
-        "/cost-today — daily spend vs. cap\n"
-        "/whoami — your handle + active session/alias + project dir\n"
-        "/sources — files loaded by the memory backend for the last call\n"
-        "/last — summary of the last claude call (tools, duration, cost)\n"
-        "/tail-audit [N] — last N audit rows (default 10)\n"
-        "\n"
-        "Natural language works too — try 'how much have I spent today'\n"
-        "or 'kill the bridge'. Destructive actions ask before doing.\n"
-        "\n"
-        "Anything else continues your current session."
-    ))
+    return CommandResult(
+        reply=(
+            "Commands:\n"
+            "/help — this list\n"
+            "/new — start a fresh session\n"
+            "/status — current session info\n"
+            "/sessions — list recent sessions (numbered)\n"
+            "/use <query> — alias or keyword search; resumes a session\n"
+            "/pick <N> — switch to a numbered match from the last list\n"
+            "/aliases — list configured session aliases\n"
+            "/pause [reason] — pause the bridge (Claude calls suspended)\n"
+            "/resume — resume the bridge\n"
+            "/halt — exit the daemon (requires Terminal to restart)\n"
+            "/cost-today — daily spend vs. cap\n"
+            "/whoami — your handle + active session/alias + project dir\n"
+            "/sources — files loaded by the memory backend for the last call\n"
+            "/last — summary of the last claude call (tools, duration, cost)\n"
+            "/tail-audit [N] — last N audit rows (default 10)\n"
+            "\n"
+            "Natural language works too — try 'how much have I spent today'\n"
+            "or 'kill the bridge'. Destructive actions ask before doing.\n"
+            "\n"
+            "Anything else continues your current session."
+        )
+    )
 
 
 def _new() -> CommandResult:
@@ -152,59 +154,56 @@ def _status(*, handle: str, state_dir: Path) -> CommandResult:
     pause_file = state_dir / "PAUSE"
     if pause_file.exists():
         try:
-            reason = pause_file.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()
+            reason = pause_file.read_text(encoding="utf-8", errors="replace").splitlines()
             first = reason[0].strip() if reason else ""
         except OSError:
             first = ""
-        paused_line = (
-            f"⏸ Paused (reason: {first or 'unknown'}). Send /resume to restart.\n"
-        )
+        paused_line = f"⏸ Paused (reason: {first or 'unknown'}). Send /resume to restart.\n"
 
     sid = state.get_current_session(handle, state_dir=state_dir)
     if not sid:
-        return CommandResult(reply=(
-            f"{paused_line}No active session — your next message starts a fresh one."
-        ))
+        return CommandResult(
+            reply=(f"{paused_line}No active session — your next message starts a fresh one.")
+        )
     info = session_discovery.find_by_id(sid)
     if info is None:
-        return CommandResult(reply=(
-            f"{paused_line}Active session: {sid[:8]} — but the transcript "
-            "file is no longer on disk. Your next message starts a fresh "
-            "session."
-        ))
-    return CommandResult(reply=(
-        f"{paused_line}Active session: {info.short_id} · "
-        f"{info.relative_age()} ago\n"
-        f"Last user msg: {info.snippet[:120]}"
-    ))
+        return CommandResult(
+            reply=(
+                f"{paused_line}Active session: {sid[:8]} — but the transcript "
+                "file is no longer on disk. Your next message starts a fresh "
+                "session."
+            )
+        )
+    return CommandResult(
+        reply=(
+            f"{paused_line}Active session: {info.short_id} · "
+            f"{info.relative_age()} ago\n"
+            f"Last user msg: {info.snippet[:120]}"
+        )
+    )
 
 
 def _pause(*, state_dir: Path, reason: str = "") -> CommandResult:
     """Create the PAUSE file. Idempotent: re-pausing rewrites the reason."""
     final_reason = reason.strip() or "manual via /pause"
     state.trip_pause(state_dir=state_dir, reason=final_reason)
-    return CommandResult(reply=(
-        f"⏸ Bridge paused. Send /resume to restart. Reason: {final_reason}"
-    ))
+    return CommandResult(
+        reply=(f"⏸ Bridge paused. Send /resume to restart. Reason: {final_reason}")
+    )
 
 
 def _resume(*, state_dir: Path) -> CommandResult:
     """Remove the PAUSE file. No-op message if not currently paused."""
     pause_file = state_dir / "PAUSE"
     if not pause_file.exists():
-        return CommandResult(reply=(
-            "Bridge wasn't paused (no PAUSE file). Nothing to do."
-        ))
+        return CommandResult(reply=("Bridge wasn't paused (no PAUSE file). Nothing to do."))
     try:
         pause_file.unlink()
     except OSError as e:
         logger.error("could not remove PAUSE file: %s", e)
-        return CommandResult(reply=(
-            "⚠️ Tried to resume but couldn't remove PAUSE file. "
-            "Check daemon logs."
-        ))
+        return CommandResult(
+            reply=("⚠️ Tried to resume but couldn't remove PAUSE file. " "Check daemon logs.")
+        )
     # Reset the consecutive-failure counter so a circuit-breaker-tripped
     # PAUSE doesn't immediately re-trip on the next failure.
     state.reset_claude_failures(state_dir=state_dir)
@@ -270,17 +269,20 @@ def _use(
             )
         logger.warning(
             "alias %r points at session %s which is no longer on disk; "
-            "falling through to keyword search", alias_key, sid[:8],
+            "falling through to keyword search",
+            alias_key,
+            sid[:8],
         )
         alias_note = (
-            f"(alias {alias_key!r} points at a session that's gone — "
-            "searching by keyword)\n"
+            f"(alias {alias_key!r} points at a session that's gone — " "searching by keyword)\n"
         )
 
     current = state.get_current_session(handle, state_dir=state_dir)
     excluded = {current} if current else set()
     sessions = session_discovery.search_sessions(
-        query, limit=10, exclude_session_ids=excluded,
+        query,
+        limit=10,
+        exclude_session_ids=excluded,
     )
     if not sessions:
         return CommandResult(reply=f"{alias_note}No sessions match {query!r}.")
@@ -314,10 +316,12 @@ def _use(
 def _aliases(*, aliases: Dict[str, str]) -> CommandResult:
     """List configured aliases with on-disk status."""
     if not aliases:
-        return CommandResult(reply=(
-            "No aliases configured. Add a session_aliases block to "
-            "config.yaml — see config.example.yaml."
-        ))
+        return CommandResult(
+            reply=(
+                "No aliases configured. Add a session_aliases block to "
+                "config.yaml — see config.example.yaml."
+            )
+        )
     lines = ["Configured aliases:"]
     for name in sorted(aliases.keys()):
         sid = aliases[name]
@@ -326,10 +330,7 @@ def _aliases(*, aliases: Dict[str, str]) -> CommandResult:
             lines.append(f"{name} · {sid[:8]} · <missing on disk>")
         else:
             snippet = (info.snippet[:60] or "(no user msg)").strip()
-            lines.append(
-                f"{name} · {info.short_id} · {info.relative_age()} ago "
-                f"({snippet})"
-            )
+            lines.append(f"{name} · {info.short_id} · {info.relative_age()} ago " f"({snippet})")
     lines.append("")
     lines.append("Send /use <name> to resume.")
     return CommandResult(reply="\n".join(lines))
@@ -345,23 +346,29 @@ def _pick(*, handle: str, state_dir: Path, raw_arg: str) -> CommandResult:
         return CommandResult(reply=f"Not a number: {raw_arg!r}. Usage: /pick <N>.")
     options = state.get_last_options(handle, state_dir=state_dir)
     if not options:
-        return CommandResult(reply=(
-            "No recent list to pick from (either you haven't run /sessions "
-            "or /use, or the list aged out). Run /sessions first."
-        ))
+        return CommandResult(
+            reply=(
+                "No recent list to pick from (either you haven't run /sessions "
+                "or /use, or the list aged out). Run /sessions first."
+            )
+        )
     if n < 1 or n > len(options):
-        return CommandResult(reply=(
-            f"Pick must be between 1 and {len(options)}. "
-            f"Run /sessions to see the current list."
-        ))
+        return CommandResult(
+            reply=(
+                f"Pick must be between 1 and {len(options)}. "
+                f"Run /sessions to see the current list."
+            )
+        )
     chosen = options[n - 1]
     sid = chosen.get("id", "")
     info = session_discovery.find_by_id(sid)
     if info is None:
-        return CommandResult(reply=(
-            f"Session {sid[:8] if sid else 'N/A'} is no longer on disk — "
-            "list may be stale. Run /sessions to refresh."
-        ))
+        return CommandResult(
+            reply=(
+                f"Session {sid[:8] if sid else 'N/A'} is no longer on disk — "
+                "list may be stale. Run /sessions to refresh."
+            )
+        )
     return CommandResult(
         reply=(
             f"Resumed [{n}] {info.short_id} · {info.relative_age()} ago\n"
@@ -375,19 +382,23 @@ def _cost_today(*, state_dir: Path, cfg: Any) -> CommandResult:
     """Daily spend / cap, no claude call."""
     cents = state.today_cost_cents(state_dir=state_dir)
     if cfg is None:
-        return CommandResult(reply=(
-            f"Today: ${cents / 100:.2f} spent. (cap unavailable — cfg "
-            "not passed to dispatcher)"
-        ))
+        return CommandResult(
+            reply=(
+                f"Today: ${cents / 100:.2f} spent. (cap unavailable — cfg "
+                "not passed to dispatcher)"
+            )
+        )
     cap_usd = float(cfg.daily_cost_cap_usd)
     cap_cents = int(round(cap_usd * 100)) or 1
     pct = (cents / cap_cents) * 100 if cap_cents else 0.0
     remaining = max(0, cap_cents - cents) / 100.0
-    return CommandResult(reply=(
-        f"Today: ${cents / 100:.2f} of ${cap_usd:.2f} cap "
-        f"({pct:.1f}%, ${remaining:.2f} remaining).\n"
-        f"Resets at 00:00 UTC."
-    ))
+    return CommandResult(
+        reply=(
+            f"Today: ${cents / 100:.2f} of ${cap_usd:.2f} cap "
+            f"({pct:.1f}%, ${remaining:.2f} remaining).\n"
+            f"Resets at 00:00 UTC."
+        )
+    )
 
 
 def _whoami(
@@ -415,18 +426,13 @@ def _whoami(
             sess_line = f"Session: {sid[:8]} (alias: {alias_str}) · gone-from-disk"
         else:
             sess_line = (
-                f"Session: {info.short_id} (alias: {alias_str}) · "
-                f"{info.relative_age()} ago"
+                f"Session: {info.short_id} (alias: {alias_str}) · " f"{info.relative_age()} ago"
             )
     if cfg is None:
         proj_line = "Project dir: (unknown — cfg not passed to dispatcher)"
     else:
         proj_line = f"Project dir: {cfg.project_directory}"
-    return CommandResult(reply=(
-        f"You: {redacted}\n"
-        f"{sess_line}\n"
-        f"{proj_line}"
-    ))
+    return CommandResult(reply=(f"You: {redacted}\n" f"{sess_line}\n" f"{proj_line}"))
 
 
 def _tail_audit(*, state_dir: Path, raw_arg: str) -> CommandResult:
@@ -441,9 +447,9 @@ def _tail_audit(*, state_dir: Path, raw_arg: str) -> CommandResult:
         try:
             n = int(raw_arg.split()[0])
         except (ValueError, IndexError):
-            return CommandResult(reply=(
-                f"Not a number: {raw_arg!r}. Usage: /tail-audit [N] (default 10)."
-            ))
+            return CommandResult(
+                reply=(f"Not a number: {raw_arg!r}. Usage: /tail-audit [N] (default 10).")
+            )
     if n < 1:
         n = 1
     if n > 100:
@@ -485,12 +491,15 @@ def _sources() -> CommandResult:
     """
     # Lazy import to avoid daemon→commands→daemon circular at module load.
     from . import daemon as daemon_mod
+
     sources = list(daemon_mod._last_memory_sources)
     if not sources:
-        return CommandResult(reply=(
-            "No memory context loaded for the last call.\n"
-            "(memory backend is either 'none' or last input was a command.)"
-        ))
+        return CommandResult(
+            reply=(
+                "No memory context loaded for the last call.\n"
+                "(memory backend is either 'none' or last input was a command.)"
+            )
+        )
     lines = ["Last query loaded:"]
     total = 0
     for path, bytes_loaded in sources:
@@ -518,23 +527,26 @@ def _last(*, state_dir: Path) -> CommandResult:
     # Find the most recent claude reply (vs. command reply).
     for row in rows:
         detail = row.get("detail") or ""
-        if (row.get("direction") == "out"
-                and row.get("kind") == "reply"
-                and detail.startswith("ok ")):
+        if (
+            row.get("direction") == "out"
+            and row.get("kind") == "reply"
+            and detail.startswith("ok ")
+        ):
             ts = row.get("ts") or "?"
             cost_cents = row.get("cost_cents")
             cost_str = f"${(cost_cents or 0) / 100:.4f}" if cost_cents is not None else "?"
             # detail looks like "ok dur=1234ms cost_cents=5 sid=abc12345"
-            return CommandResult(reply=(
-                f"Last claude call: {ts}\n"
-                f"  {detail}\n"
-                f"  cost: {cost_str}\n"
-                f"  bytes replied: {row.get('reply_bytes') or 0}"
-            ))
-    return CommandResult(reply=(
-        "No claude calls found in recent audit history. Send a message "
-        "to claude first."
-    ))
+            return CommandResult(
+                reply=(
+                    f"Last claude call: {ts}\n"
+                    f"  {detail}\n"
+                    f"  cost: {cost_str}\n"
+                    f"  bytes replied: {row.get('reply_bytes') or 0}"
+                )
+            )
+    return CommandResult(
+        reply=("No claude calls found in recent audit history. Send a message " "to claude first.")
+    )
 
 
 def _halt() -> CommandResult:

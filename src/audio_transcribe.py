@@ -40,15 +40,17 @@ logger = logging.getLogger(__name__)
 
 # Audio file extensions we'll attempt to transcribe. Apple's iMessage
 # Voice Memos write .caf; sharing from Voice Memos.app writes .m4a.
-AUDIO_EXTENSIONS: Final = frozenset({
-    ".caf",
-    ".m4a",
-    ".mp3",
-    ".wav",
-    ".aac",
-    ".ogg",
-    ".flac",
-})
+AUDIO_EXTENSIONS: Final = frozenset(
+    {
+        ".caf",
+        ".m4a",
+        ".mp3",
+        ".wav",
+        ".aac",
+        ".ogg",
+        ".flac",
+    }
+)
 
 
 def is_audio_file(path: str) -> bool:
@@ -69,9 +71,7 @@ MAX_AUDIO_BYTES: Final = 25 * 1024 * 1024
 # Default whisper.cpp model. base.en is a good accuracy/speed tradeoff
 # for short English voice notes (~150MB, ~1x realtime on Apple Silicon).
 # Override via config (Config.whisper_model_path).
-DEFAULT_MODEL_PATH: Final = (
-    Path.home() / "whisper.cpp" / "models" / "ggml-base.en.bin"
-)
+DEFAULT_MODEL_PATH: Final = Path.home() / "whisper.cpp" / "models" / "ggml-base.en.bin"
 
 # Cap on transcription wallclock time. Beyond this we kill the process.
 TRANSCRIBE_TIMEOUT_SECONDS: Final = 60
@@ -93,7 +93,9 @@ _NATIVE_WAV_EXTS: Final = frozenset({".wav"})
 
 
 def _transcode_to_wav(
-    src: Path, dst: Path, timeout_seconds: int = 30,
+    src: Path,
+    dst: Path,
+    timeout_seconds: int = 30,
 ) -> bool:
     """Convert ``src`` (any afconvert-supported format) to 16-kHz mono
     WAV at ``dst``. Returns True on success.
@@ -105,7 +107,8 @@ def _transcode_to_wav(
         logger.warning(
             "afconvert not found at %s — can't transcode %s to WAV. "
             "(afconvert ships with macOS; this should be impossible.)",
-            AFCONVERT_BIN, src,
+            AFCONVERT_BIN,
+            src,
         )
         return False
     # Fixed argv. No shell. Source path comes from the chat.db
@@ -114,9 +117,12 @@ def _transcode_to_wav(
     argv = [
         str(AFCONVERT_BIN),
         str(src),
-        "-f", "WAVE",
-        "-d", "LEI16@16000",  # little-endian int16, 16 kHz
-        "-c", "1",            # mono
+        "-f",
+        "WAVE",
+        "-d",
+        "LEI16@16000",  # little-endian int16, 16 kHz
+        "-c",
+        "1",  # mono
         str(dst),
     ]
     try:
@@ -133,7 +139,8 @@ def _transcode_to_wav(
     if proc.returncode != 0:
         logger.warning(
             "afconvert exit=%d on %s: %s",
-            proc.returncode, src,
+            proc.returncode,
+            src,
             proc.stderr.decode("utf-8", errors="replace")[:300],
         )
         return False
@@ -183,7 +190,9 @@ def transcribe(
     if size > MAX_AUDIO_BYTES:
         logger.warning(
             "audio file %s exceeds size cap (%d > %d) — skipping",
-            audio_path, size, MAX_AUDIO_BYTES,
+            audio_path,
+            size,
+            MAX_AUDIO_BYTES,
         )
         return None
 
@@ -242,8 +251,10 @@ def transcribe(
         # builds that don't print to stdout.
         argv = [
             str(bin_path),
-            "-m", str(model),
-            "-f", str(whisper_input),
+            "-m",
+            str(model),
+            "-f",
+            str(whisper_input),
             "-nt",
             "-otxt",
         ]
@@ -258,7 +269,8 @@ def transcribe(
         except subprocess.TimeoutExpired:
             logger.error(
                 "whisper.cpp timeout on %s after %ds",
-                audio_path, timeout_seconds,
+                audio_path,
+                timeout_seconds,
             )
             return None
         except OSError as e:
@@ -268,7 +280,8 @@ def transcribe(
         if result.returncode != 0:
             logger.warning(
                 "whisper.cpp exit=%d on %s: %s",
-                result.returncode, audio_path,
+                result.returncode,
+                audio_path,
                 result.stderr.decode("utf-8", errors="replace")[:400],
             )
             return None

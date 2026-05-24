@@ -59,8 +59,12 @@ def test_write_status_reflects_consecutive_failures(state_dir: Path):
     state.record_claude_failure(state_dir=state_dir)
     state.record_claude_failure(state_dir=state_dir)
     out = health.write_status(
-        state_dir=state_dir, cursor=0, metrics={},
-        daily_cost_cap_usd=5.0, paused=False, stop_requested=False,
+        state_dir=state_dir,
+        cursor=0,
+        metrics={},
+        daily_cost_cap_usd=5.0,
+        paused=False,
+        stop_requested=False,
     )
     data = json.loads(out.read_text())
     assert data["consecutive_failures"] == 2
@@ -69,8 +73,12 @@ def test_write_status_reflects_consecutive_failures(state_dir: Path):
 def test_write_status_reflects_paused_flag(state_dir: Path):
     state.init_state_dir(state_dir)
     out = health.write_status(
-        state_dir=state_dir, cursor=0, metrics={},
-        daily_cost_cap_usd=5.0, paused=True, stop_requested=False,
+        state_dir=state_dir,
+        cursor=0,
+        metrics={},
+        daily_cost_cap_usd=5.0,
+        paused=True,
+        stop_requested=False,
     )
     data = json.loads(out.read_text())
     assert data["paused"] is True
@@ -79,8 +87,12 @@ def test_write_status_reflects_paused_flag(state_dir: Path):
 def test_write_status_tight_perms(state_dir: Path):
     state.init_state_dir(state_dir)
     out = health.write_status(
-        state_dir=state_dir, cursor=0, metrics={},
-        daily_cost_cap_usd=5.0, paused=False, stop_requested=False,
+        state_dir=state_dir,
+        cursor=0,
+        metrics={},
+        daily_cost_cap_usd=5.0,
+        paused=False,
+        stop_requested=False,
     )
     mode = out.stat().st_mode & 0o777
     assert mode == 0o600
@@ -91,8 +103,12 @@ def test_write_status_atomic_overwrite(state_dir: Path):
     state.init_state_dir(state_dir)
     for cursor in range(1, 6):
         health.write_status(
-            state_dir=state_dir, cursor=cursor, metrics={"i": cursor},
-            daily_cost_cap_usd=5.0, paused=False, stop_requested=False,
+            state_dir=state_dir,
+            cursor=cursor,
+            metrics={"i": cursor},
+            daily_cost_cap_usd=5.0,
+            paused=False,
+            stop_requested=False,
         )
     # Only one status.json should exist; no .status.*.tmp lying around.
     files = {p.name for p in state_dir.iterdir()}
@@ -108,14 +124,26 @@ def test_status_v1_locked_key_set(state_dir: Path):
     that doesn't bump STATUS_SCHEMA_VERSION will fail this test."""
     state.init_state_dir(state_dir)
     out = health.write_status(
-        state_dir=state_dir, cursor=0, metrics={},
-        daily_cost_cap_usd=5.0, paused=False, stop_requested=False,
+        state_dir=state_dir,
+        cursor=0,
+        metrics={},
+        daily_cost_cap_usd=5.0,
+        paused=False,
+        stop_requested=False,
     )
     data = json.loads(out.read_text())
     expected_v1_keys = {
-        "schema_version", "ts", "pid", "cursor", "paused", "stop_requested",
-        "consecutive_failures", "daily_cost_cents", "daily_cost_cap_cents",
-        "schema_db_version", "metrics",
+        "schema_version",
+        "ts",
+        "pid",
+        "cursor",
+        "paused",
+        "stop_requested",
+        "consecutive_failures",
+        "daily_cost_cents",
+        "daily_cost_cap_cents",
+        "schema_db_version",
+        "metrics",
     }
     assert set(data.keys()) == expected_v1_keys, (
         "status.json schema changed — bump STATUS_SCHEMA_VERSION and update "
@@ -130,8 +158,12 @@ def test_write_status_uses_cost_cap_cents(state_dir: Path):
     state.init_state_dir(state_dir)
     state.add_cost_cents(123, state_dir=state_dir)
     out = health.write_status(
-        state_dir=state_dir, cursor=0, metrics={},
-        daily_cost_cap_usd=7.50, paused=False, stop_requested=False,
+        state_dir=state_dir,
+        cursor=0,
+        metrics={},
+        daily_cost_cap_usd=7.50,
+        paused=False,
+        stop_requested=False,
     )
     data = json.loads(out.read_text())
     assert data["daily_cost_cap_cents"] == 750

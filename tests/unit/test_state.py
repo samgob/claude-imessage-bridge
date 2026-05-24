@@ -23,6 +23,7 @@ from src import state
 
 # --- Init ---------------------------------------------------------------
 
+
 def test_init_state_dir_creates_db_with_tight_perms(state_dir: Path):
     db = state.init_state_dir(state_dir)
     assert db.exists()
@@ -42,6 +43,7 @@ def test_init_state_dir_tightens_existing_loose_db(state_dir: Path):
 
 
 # --- Cursor regression --------------------------------------------------
+
 
 def test_cursor_forward_motion_allowed(state_dir: Path):
     state.set_cursor("c", 1, state_dir=state_dir)
@@ -74,6 +76,7 @@ def test_cursor_default_when_unset(state_dir: Path):
 
 
 # --- Rate limit reservation --------------------------------------------
+
 
 def test_reserve_reply_slot_grants_under_limit(state_dir: Path):
     granted, n = state.reserve_reply_slot("+15551234567", 10, state_dir=state_dir)
@@ -116,13 +119,12 @@ def test_prune_reply_counter_drops_old_buckets(state_dir: Path):
         )
     state.prune_reply_counter(keep_buckets=10, state_dir=state_dir)
     with state.connection(state_dir) as conn:
-        row = conn.execute(
-            "SELECT n FROM reply_counter WHERE bucket = ?", (old_bucket,)
-        ).fetchone()
+        row = conn.execute("SELECT n FROM reply_counter WHERE bucket = ?", (old_bucket,)).fetchone()
     assert row is None
 
 
 # --- Daily cost ---------------------------------------------------------
+
 
 def test_today_cost_cents_starts_zero(state_dir: Path):
     assert state.today_cost_cents(state_dir=state_dir) == 0
@@ -145,6 +147,7 @@ def test_cost_over_cap_uses_integer_math(state_dir: Path):
 
 # --- Conversations / sessions ------------------------------------------
 
+
 def test_get_current_session_default_none(state_dir: Path):
     state.init_state_dir(state_dir)
     assert state.get_current_session("+15551234567", state_dir=state_dir) is None
@@ -163,6 +166,7 @@ def test_set_current_session_can_clear(state_dir: Path):
 
 # --- Last options TTL ---------------------------------------------------
 
+
 def test_last_options_fresh_returned(state_dir: Path):
     opts = [{"id": "sess-1", "snippet": "first"}, {"id": "sess-2", "snippet": "second"}]
     state.set_last_options("+15551234567", opts, state_dir=state_dir)
@@ -174,8 +178,9 @@ def test_last_options_stale_returns_empty(state_dir: Path):
     handle = "+15551234567"
     state.set_last_options(handle, [{"id": "a"}], state_dir=state_dir)
     # Force the ts to be older than the TTL
-    old = (datetime.now(timezone.utc)
-           - timedelta(seconds=state.LAST_OPTIONS_TTL_SECONDS + 60)).isoformat()
+    old = (
+        datetime.now(timezone.utc) - timedelta(seconds=state.LAST_OPTIONS_TTL_SECONDS + 60)
+    ).isoformat()
     with state.connection(state_dir) as conn:
         conn.execute(
             "UPDATE conversations SET last_options_at = ? WHERE handle = ?",
@@ -204,6 +209,7 @@ def test_last_options_corrupt_json_returns_empty(state_dir: Path):
 
 # --- Pending NL-intent confirmations (schema v3) ------------------------
 
+
 def test_pending_intent_none_default(state_dir: Path):
     state.init_state_dir(state_dir)
     assert state.get_pending_intent("+15551234567", state_dir=state_dir) is None
@@ -217,7 +223,10 @@ def test_pending_intent_set_and_get(state_dir: Path):
 
 def test_pending_intent_with_extra_arg(state_dir: Path):
     state.set_pending_intent(
-        "+15551234567", "/use", "wesco", state_dir=state_dir,
+        "+15551234567",
+        "/use",
+        "wesco",
+        state_dir=state_dir,
     )
     pending = state.get_pending_intent("+15551234567", state_dir=state_dir)
     assert pending == {"command": "/use", "extra_arg": "wesco"}
@@ -228,8 +237,8 @@ def test_pending_intent_ttl_expires(state_dir: Path):
     handle = "+15551234567"
     state.set_pending_intent(handle, "/halt", state_dir=state_dir)
     # Backdate the timestamp past the TTL.
-    old = (datetime.now(timezone.utc) - timedelta(
-        seconds=state.PENDING_INTENT_TTL_SECONDS + 5)
+    old = (
+        datetime.now(timezone.utc) - timedelta(seconds=state.PENDING_INTENT_TTL_SECONDS + 5)
     ).isoformat()
     with state.connection(state_dir) as conn:
         conn.execute(
@@ -260,8 +269,8 @@ def test_clear_pending_intent_nulls_columns(state_dir: Path):
     # Verify the columns are actually NULL (not the TTL path):
     with state.connection(state_dir) as conn:
         row = conn.execute(
-            "SELECT pending_intent_json, pending_intent_at "
-            "FROM conversations WHERE handle = ?", (handle,),
+            "SELECT pending_intent_json, pending_intent_at " "FROM conversations WHERE handle = ?",
+            (handle,),
         ).fetchone()
     assert row["pending_intent_json"] is None
     assert row["pending_intent_at"] is None
@@ -277,6 +286,7 @@ def test_set_pending_intent_overwrites(state_dir: Path):
 
 
 # --- Circuit breaker / failure tracking --------------------------------
+
 
 def test_failure_counter_default_zero(state_dir: Path):
     state.init_state_dir(state_dir)
@@ -308,15 +318,17 @@ def test_trip_pause_creates_pause_file(state_dir: Path):
 
 # --- Audit -------------------------------------------------------------
 
+
 def test_audit_persists_row(state_dir: Path):
     state.audit(
-        handle_redacted="abc***@x", direction="in", kind="text",
-        detail="ok", state_dir=state_dir,
+        handle_redacted="abc***@x",
+        direction="in",
+        kind="text",
+        detail="ok",
+        state_dir=state_dir,
     )
     with state.connection(state_dir) as conn:
-        rows = conn.execute(
-            "SELECT direction, kind, detail FROM audit_log"
-        ).fetchall()
+        rows = conn.execute("SELECT direction, kind, detail FROM audit_log").fetchall()
     assert len(rows) == 1
     assert rows[0]["direction"] == "in"
     assert rows[0]["kind"] == "text"
@@ -324,32 +336,44 @@ def test_audit_persists_row(state_dir: Path):
 
 def test_audit_supports_reply_bytes(state_dir: Path):
     state.audit(
-        handle_redacted="abc***@x", direction="out", kind="reply",
-        detail="ok", reply_bytes=42, state_dir=state_dir,
+        handle_redacted="abc***@x",
+        direction="out",
+        kind="reply",
+        detail="ok",
+        reply_bytes=42,
+        state_dir=state_dir,
     )
     with state.connection(state_dir) as conn:
-        row = conn.execute(
-            "SELECT reply_bytes FROM audit_log"
-        ).fetchone()
+        row = conn.execute("SELECT reply_bytes FROM audit_log").fetchone()
     assert row["reply_bytes"] == 42
 
 
 def test_audit_persists_structured_columns(state_dir: Path):
     """v1 schema: chatdb_rowid, cost_cents, error_category."""
     state.audit(
-        handle_redacted="abc***@x", direction="out", kind="reply",
-        detail="ok", reply_bytes=42, chatdb_rowid=12345,
-        cost_cents=7, error_category=None, state_dir=state_dir,
+        handle_redacted="abc***@x",
+        direction="out",
+        kind="reply",
+        detail="ok",
+        reply_bytes=42,
+        chatdb_rowid=12345,
+        cost_cents=7,
+        error_category=None,
+        state_dir=state_dir,
     )
     state.audit(
-        handle_redacted="abc***@x", direction="out", kind="reply",
-        detail="err", chatdb_rowid=12346, cost_cents=0,
-        error_category="timeout", state_dir=state_dir,
+        handle_redacted="abc***@x",
+        direction="out",
+        kind="reply",
+        detail="err",
+        chatdb_rowid=12346,
+        cost_cents=0,
+        error_category="timeout",
+        state_dir=state_dir,
     )
     with state.connection(state_dir) as conn:
         rows = conn.execute(
-            "SELECT chatdb_rowid, cost_cents, error_category "
-            "FROM audit_log ORDER BY rowid"
+            "SELECT chatdb_rowid, cost_cents, error_category " "FROM audit_log ORDER BY rowid"
         ).fetchall()
     assert [r["chatdb_rowid"] for r in rows] == [12345, 12346]
     assert [r["cost_cents"] for r in rows] == [7, 0]
@@ -359,8 +383,11 @@ def test_audit_persists_structured_columns(state_dir: Path):
 def test_audit_legacy_signature_still_works(state_dir: Path):
     """Older callers that don't pass the new kwargs must still succeed."""
     state.audit(
-        handle_redacted="abc***@x", direction="in", kind="text",
-        detail="ok", state_dir=state_dir,
+        handle_redacted="abc***@x",
+        direction="in",
+        kind="text",
+        detail="ok",
+        state_dir=state_dir,
     )
     with state.connection(state_dir) as conn:
         row = conn.execute(
@@ -372,6 +399,7 @@ def test_audit_legacy_signature_still_works(state_dir: Path):
 
 
 # --- Schema versioning ------------------------------------------------
+
 
 def test_schema_version_stamped_on_init(state_dir: Path):
     state.init_state_dir(state_dir)
@@ -523,7 +551,9 @@ def test_schema_v1_to_v2_adds_conversations_columns(state_dir: Path):
     # And the post-migration set_last_options call must succeed (this is
     # the live failure mode — INSERT with last_options_at column).
     state.set_last_options(
-        "+15551234567", [{"id": "x", "snippet": "y"}], state_dir=state_dir,
+        "+15551234567",
+        [{"id": "x", "snippet": "y"}],
+        state_dir=state_dir,
     )
     assert state.get_last_options("+15551234567", state_dir=state_dir) == [
         {"id": "x", "snippet": "y"}

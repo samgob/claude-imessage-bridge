@@ -85,10 +85,7 @@ def _apple_date_to_iso(value: int) -> str:
     else:
         seconds = float(value)
     unix = seconds + _APPLE_EPOCH_OFFSET
-    return (
-        datetime.fromtimestamp(unix, tz=timezone.utc)
-        .strftime("%Y-%m-%dT%H:%M:%SZ")
-    )
+    return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass(frozen=True)
@@ -96,12 +93,12 @@ class Message:
     """One inbound iMessage we want to consider routing."""
 
     rowid: int
-    chat_guid: str            # the conversation (1:1 or group)
-    is_group: bool            # True if chat.style indicates a group
-    sender_handle: str        # raw from chat.db (caller normalizes)
-    timestamp_iso: str        # UTC ISO-8601
-    body: str                 # capped at MAX_BODY_BYTES, BiDi NOT yet stripped
-    body_truncated: bool      # True if body was longer than the cap
+    chat_guid: str  # the conversation (1:1 or group)
+    is_group: bool  # True if chat.style indicates a group
+    sender_handle: str  # raw from chat.db (caller normalizes)
+    timestamp_iso: str  # UTC ISO-8601
+    body: str  # capped at MAX_BODY_BYTES, BiDi NOT yet stripped
+    body_truncated: bool  # True if body was longer than the cap
     parse_warning: Optional[str] = None  # set when attributedBody parse failed
     has_attachment: bool = False  # row had cache_has_attachments=1 in chat.db
     # Local filesystem paths of attachment files. Vetted by
@@ -158,10 +155,13 @@ def _extract_attributed_body_text(blob: bytes) -> Optional[str]:
     # rich content (mentions, contacts, link previews) and we can't safely
     # pick "the body" without risking attacker-controlled fields.
     boring_classes = {
-        "NSString", "NSMutableString",
-        "NSAttributedString", "NSMutableAttributedString",
+        "NSString",
+        "NSMutableString",
+        "NSAttributedString",
+        "NSMutableAttributedString",
         "NSConcreteAttributedString",
-        "NSDictionary", "NSMutableDictionary",
+        "NSDictionary",
+        "NSMutableDictionary",
     }
     skip = boring_classes | {"$null"}
 
@@ -191,7 +191,8 @@ def _extract_attributed_body_text(blob: bytes) -> Optional[str]:
 
 
 def _resolve_attachment_paths(
-    conn: sqlite3.Connection, message_rowid: int,
+    conn: sqlite3.Connection,
+    message_rowid: int,
 ) -> tuple:
     """Look up attachment file paths for ``message_rowid``.
 
@@ -224,7 +225,8 @@ def _resolve_attachment_paths(
         except ValueError:
             logger.debug(
                 "attachment path %r outside %s — dropping",
-                filename, _ATTACHMENT_ROOT,
+                filename,
+                _ATTACHMENT_ROOT,
             )
             continue
         if not p.is_file():
@@ -327,7 +329,8 @@ def fetch_new_messages(
             attachment_paths: tuple = ()
             if has_attachment:
                 attachment_paths = _resolve_attachment_paths(
-                    conn, int(row["rowid"]),
+                    conn,
+                    int(row["rowid"]),
                 )
             # Cursor-advance-on-skip: yield as empty-skip when there's
             # nothing actionable. Three skip conditions:
@@ -341,9 +344,8 @@ def fetch_new_messages(
             #      We silently advance the cursor instead of pestering the
             #      user. If a real image was just slow to download, the
             #      user re-sends — that's the right cost/UX tradeoff.
-            no_actionable_content = (
-                (not body.strip())
-                and (not has_attachment or not attachment_paths)
+            no_actionable_content = (not body.strip()) and (
+                not has_attachment or not attachment_paths
             )
             if (not sender) or no_actionable_content:
                 yield Message(

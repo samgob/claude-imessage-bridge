@@ -16,6 +16,7 @@ from src import memory as memory_mod
 
 # --- Helpers -------------------------------------------------------------
 
+
 def _make_memory_tree(root_dir: Path) -> Path:
     """Build a fake CLAUDE.md + memory/ tree under ``root_dir``.
 
@@ -24,10 +25,7 @@ def _make_memory_tree(root_dir: Path) -> Path:
     with a few sample .md files.
     """
     claude_md = root_dir / "CLAUDE.md"
-    claude_md.write_text(
-        "# Sam\n\n"
-        "EVP at Upstage. Active deals: Wesco, Samsung, LexisNexis.\n"
-    )
+    claude_md.write_text("# Sam\n\n" "EVP at Upstage. Active deals: Wesco, Samsung, LexisNexis.\n")
     memory = root_dir / "memory"
     memory.mkdir()
     (memory / "projects").mkdir()
@@ -39,16 +37,13 @@ def _make_memory_tree(root_dir: Path) -> Path:
     (memory / "projects" / "samsung.md").write_text(
         "# Samsung Install 3\n\nDocker/firewall issues; kickoff May 6.\n"
     )
-    (memory / "people" / "brian.md").write_text(
-        "# Brian Lawing\n\nUpstage Sales/BD lead.\n"
-    )
-    (memory / "context" / "conferences.md").write_text(
-        "# Conferences\n\nINTNY, MCEIF coming up.\n"
-    )
+    (memory / "people" / "brian.md").write_text("# Brian Lawing\n\nUpstage Sales/BD lead.\n")
+    (memory / "context" / "conferences.md").write_text("# Conferences\n\nINTNY, MCEIF coming up.\n")
     return claude_md
 
 
 # --- NoneBackend ---------------------------------------------------------
+
 
 def test_none_backend_returns_empty():
     backend = memory_mod.NoneBackend()
@@ -58,6 +53,7 @@ def test_none_backend_returns_empty():
 
 
 # --- _tokenize -----------------------------------------------------------
+
 
 def test_tokenize_drops_stopwords_and_short():
     tokens = memory_mod._tokenize("What is the status of Wesco today?")
@@ -80,6 +76,7 @@ def test_tokenize_dedupes():
 
 
 # --- ClaudeMdBackend basic shape ----------------------------------------
+
 
 def test_claude_md_loads_eager_core(tmp_path: Path):
     claude_md = _make_memory_tree(tmp_path)
@@ -121,9 +118,7 @@ def test_claude_md_excluded_paths_skipped(tmp_path: Path):
     (tmp_path / "memory" / "projects" / "wesco_secrets.md").write_text(
         "secret credentials for wesco\n"
     )
-    backend = memory_mod.ClaudeMdBackend(
-        root=claude_md, max_bytes=32 * 1024, exclude=[r"secrets"]
-    )
+    backend = memory_mod.ClaudeMdBackend(root=claude_md, max_bytes=32 * 1024, exclude=[r"secrets"])
     r = backend.context_for("wesco")
     src_paths = [s[0] for s in r.sources]
     assert not any("secrets" in p for p in src_paths)
@@ -134,9 +129,7 @@ def test_claude_md_max_bytes_cap(tmp_path: Path):
     claude_md = _make_memory_tree(tmp_path)
     # Make one project file enormous so it triggers truncation.
     big = "x" * (50 * 1024)
-    (tmp_path / "memory" / "projects" / "huge.md").write_text(
-        f"# huge\n\n{big}\n"
-    )
+    (tmp_path / "memory" / "projects" / "huge.md").write_text(f"# huge\n\n{big}\n")
     backend = memory_mod.ClaudeMdBackend(root=claude_md, max_bytes=4 * 1024)
     r = backend.context_for("huge")
     # The total bytes loaded should not exceed the cap by more than the
@@ -146,9 +139,7 @@ def test_claude_md_max_bytes_cap(tmp_path: Path):
 
 def test_claude_md_missing_root_returns_empty(tmp_path: Path):
     """A non-existent root produces empty context, with a warning."""
-    backend = memory_mod.ClaudeMdBackend(
-        root=tmp_path / "no_such_file.md", max_bytes=32 * 1024
-    )
+    backend = memory_mod.ClaudeMdBackend(root=tmp_path / "no_such_file.md", max_bytes=32 * 1024)
     r = backend.context_for("anything")
     assert r.text == ""
     assert r.sources == []
@@ -177,12 +168,10 @@ def test_claude_md_follow_references_disabled(tmp_path: Path):
 
 # --- CustomScriptBackend -------------------------------------------------
 
+
 def test_custom_script_runs_and_captures_stdout(tmp_path: Path):
     script = tmp_path / "context.sh"
-    script.write_text(
-        "#!/bin/bash\n"
-        'echo "context for: $(cat)"\n'
-    )
+    script.write_text("#!/bin/bash\n" 'echo "context for: $(cat)"\n')
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     backend = memory_mod.CustomScriptBackend(script=script, timeout_seconds=5)
     r = backend.context_for("hello world")
@@ -221,9 +210,12 @@ def test_custom_script_timeout_returns_empty(tmp_path: Path):
 
 # --- build_backend factory -----------------------------------------------
 
+
 def test_build_backend_none():
     b = memory_mod.build_backend(
-        backend_name="none", claude_md_params={}, custom_params={},
+        backend_name="none",
+        claude_md_params={},
+        custom_params={},
     )
     assert isinstance(b, memory_mod.NoneBackend)
 
@@ -247,6 +239,8 @@ def test_build_backend_claude_md(tmp_path: Path):
 
 def test_build_backend_unknown_falls_back_to_none():
     b = memory_mod.build_backend(
-        backend_name="invalid", claude_md_params={}, custom_params={},
+        backend_name="invalid",
+        claude_md_params={},
+        custom_params={},
     )
     assert isinstance(b, memory_mod.NoneBackend)

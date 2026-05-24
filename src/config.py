@@ -41,9 +41,9 @@ _ALIAS_UUID_RE = re.compile(r"^[a-f0-9-]{8,40}$")
 @dataclass(frozen=True)
 class Config:
     project_directory: Path
-    allowlist: List[str]                 # normalized handles
-    allow_group_chat_guids: List[str]    # opt-in groups only
-    allowed_tools: List[str]             # may be empty (= text-only chat)
+    allowlist: List[str]  # normalized handles
+    allow_group_chat_guids: List[str]  # opt-in groups only
+    allowed_tools: List[str]  # may be empty (= text-only chat)
     forbidden_tools: List[str]
     poll_interval_seconds: float
     reply_rate_limit_per_minute: int
@@ -51,7 +51,7 @@ class Config:
     per_call_cost_cap_usd: float
     per_call_max_turns: int
     per_call_timeout_seconds: int
-    circuit_breaker_failures: int        # consecutive failures -> auto-PAUSE
+    circuit_breaker_failures: int  # consecutive failures -> auto-PAUSE
     claude_binary: str
     debug: bool
     # name → session UUID. Always resolved to a flat dict-of-str regardless
@@ -79,9 +79,7 @@ class Config:
     # Default: just CLAUDE.md, which is too foundational to mutate
     # without a human in the loop. Operators can add more (e.g.
     # ~/.claude/settings.json) per their threat model.
-    protected_files: List[str] = field(
-        default_factory=lambda: ["~/.claude/CLAUDE.md"]
-    )
+    protected_files: List[str] = field(default_factory=lambda: ["~/.claude/CLAUDE.md"])
     # Optional path overrides for offline audio transcription via
     # whisper.cpp. When unset, the bridge:
     #   - looks for `whisper-cli` or `main` on PATH;
@@ -148,9 +146,7 @@ def _validate_claude_binary(path: str) -> None:
         try:
             dst = d.stat()
         except OSError as e:
-            raise ValueError(
-                f"could not stat directory {d} in claude_binary path: {e}"
-            )
+            raise ValueError(f"could not stat directory {d} in claude_binary path: {e}")
         if dst.st_mode & 0o022:
             raise ValueError(
                 f"directory {d} on claude_binary path is group/world-writable "
@@ -184,8 +180,7 @@ def _validate_tools(allowed: List[str], forbidden: List[str]) -> None:
     overlap = set(allowed) & set(forbidden)
     if overlap:
         raise ValueError(
-            f"tools appear in both allowed_tools and forbidden_tools: "
-            f"{sorted(overlap)}"
+            f"tools appear in both allowed_tools and forbidden_tools: " f"{sorted(overlap)}"
         )
 
 
@@ -214,9 +209,7 @@ def _parse_session_aliases(raw: dict) -> Dict[str, str]:
     parsed: Dict[str, str] = {}
     for name, value in raw_aliases.items():
         if not isinstance(name, str):
-            raise ValueError(
-                f"session_aliases keys must be strings, got {type(name).__name__}"
-            )
+            raise ValueError(f"session_aliases keys must be strings, got {type(name).__name__}")
         key = name.lower()
         if not _ALIAS_KEY_RE.match(key):
             raise ValueError(
@@ -228,9 +221,7 @@ def _parse_session_aliases(raw: dict) -> Dict[str, str]:
             uuid_str = value
         elif isinstance(value, dict):
             if "id" not in value:
-                raise ValueError(
-                    f"session_aliases[{name!r}] is a mapping but has no 'id' field"
-                )
+                raise ValueError(f"session_aliases[{name!r}] is a mapping but has no 'id' field")
             uuid_raw = value["id"]
             if not isinstance(uuid_raw, str):
                 raise ValueError(
@@ -263,8 +254,7 @@ def load(path: Path) -> Config:
     """Load + validate config. Raises on any structural error."""
     if not path.exists():
         raise FileNotFoundError(
-            f"Config not found at {path}. "
-            f"Copy config.example.yaml and fill in your handles."
+            f"Config not found at {path}. " f"Copy config.example.yaml and fill in your handles."
         )
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict):
@@ -282,9 +272,7 @@ def load(path: Path) -> Config:
     allowlist: List[str] = []
     for entry in raw_allowlist:
         if not isinstance(entry, str):
-            raise ValueError(
-                f"allowlist entries must be strings, got {type(entry).__name__}"
-            )
+            raise ValueError(f"allowlist entries must be strings, got {type(entry).__name__}")
         try:
             allowlist.append(validate_handle(entry))
         except HandleError as e:
@@ -330,8 +318,7 @@ def load(path: Path) -> Config:
         raise ValueError("per_call_cost_cap_usd must be > 0")
     if per_call_cap > cost:
         raise ValueError(
-            f"per_call_cost_cap_usd ({per_call_cap}) must be <= "
-            f"daily_cost_cap_usd ({cost})"
+            f"per_call_cost_cap_usd ({per_call_cap}) must be <= " f"daily_cost_cap_usd ({cost})"
         )
 
     max_turns = int(raw.get("per_call_max_turns", 1))
@@ -361,9 +348,7 @@ def load(path: Path) -> Config:
     raw_protected = raw.get("protected_files")
     if raw_protected is None:
         protected_files = ["~/.claude/CLAUDE.md"]
-    elif not isinstance(raw_protected, list) or not all(
-        isinstance(p, str) for p in raw_protected
-    ):
+    elif not isinstance(raw_protected, list) or not all(isinstance(p, str) for p in raw_protected):
         raise ValueError("protected_files must be a list of strings")
     else:
         protected_files = list(raw_protected)
@@ -410,9 +395,7 @@ def load(path: Path) -> Config:
 _VALID_TRUST_PRESETS = frozenset({"chat_only", "coding", "full"})
 
 
-def _parse_trust(
-    raw: dict, session_aliases: Dict[str, str]
-) -> tuple[str, Dict[str, str]]:
+def _parse_trust(raw: dict, session_aliases: Dict[str, str]) -> tuple[str, Dict[str, str]]:
     """Parse the top-level ``trust:`` block.
 
     Returns ``(default, per_alias)``. Both default to safe values
@@ -431,8 +414,7 @@ def _parse_trust(
     default = str(block.get("default", "chat_only"))
     if default not in _VALID_TRUST_PRESETS:
         raise ValueError(
-            f"trust.default must be one of {sorted(_VALID_TRUST_PRESETS)}, "
-            f"got {default!r}"
+            f"trust.default must be one of {sorted(_VALID_TRUST_PRESETS)}, " f"got {default!r}"
         )
 
     raw_per_alias = block.get("per_alias") or {}
@@ -441,9 +423,7 @@ def _parse_trust(
     per_alias: Dict[str, str] = {}
     for alias_key, preset_name in raw_per_alias.items():
         if not isinstance(alias_key, str) or not isinstance(preset_name, str):
-            raise ValueError(
-                "trust.per_alias entries must be string→string mappings"
-            )
+            raise ValueError("trust.per_alias entries must be string→string mappings")
         if alias_key not in session_aliases:
             raise ValueError(
                 f"trust.per_alias key {alias_key!r} is not a defined "
@@ -477,8 +457,7 @@ def _parse_memory(raw: dict) -> tuple[str, Dict[str, object], Dict[str, object]]
     backend = str(block.get("backend", "none"))
     if backend not in _VALID_MEMORY_BACKENDS:
         raise ValueError(
-            f"memory.backend must be one of {sorted(_VALID_MEMORY_BACKENDS)}, "
-            f"got {backend!r}"
+            f"memory.backend must be one of {sorted(_VALID_MEMORY_BACKENDS)}, " f"got {backend!r}"
         )
 
     claude_md_block = block.get("claude_md") or {}
@@ -495,9 +474,7 @@ def _parse_memory(raw: dict) -> tuple[str, Dict[str, object], Dict[str, object]]
     if not isinstance(max_bytes_val, int):  # defensive; set above
         raise ValueError("memory.claude_md.max_bytes must be an integer")
     if max_bytes_val < 1024 or max_bytes_val > 256 * 1024:
-        raise ValueError(
-            "memory.claude_md.max_bytes must be in [1024, 262144]"
-        )
+        raise ValueError("memory.claude_md.max_bytes must be in [1024, 262144]")
 
     custom_block = block.get("custom") or {}
     if not isinstance(custom_block, dict):

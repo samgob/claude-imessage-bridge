@@ -104,6 +104,7 @@ def test_cimb_status_warns_when_stale(tmp_path: Path, capsys):
     stale_age = 2 * mod.HEARTBEAT_INTERVAL_SECONDS + 60
     past = time.time() - stale_age
     import os
+
     os.utime(status_path, (past, past))
 
     rc = mod.main([str(status_path)])
@@ -148,7 +149,9 @@ def test_cimb_status_subprocess_invocation(tmp_path: Path):
     _write_status(status_path)
     result = subprocess.run(
         [sys.executable, str(SCRIPT_PATH), str(status_path)],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert result.returncode == 0
     assert "claude-imessage-bridge" in result.stdout

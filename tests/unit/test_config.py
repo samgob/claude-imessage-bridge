@@ -41,6 +41,7 @@ def _good_yaml(project_dir: Path, claude_bin: Path) -> dict:
 
 # --- happy path --------------------------------------------------------
 
+
 def test_load_happy_path(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"
     project = tmp_path / "proj"
@@ -66,12 +67,14 @@ def test_load_normalizes_email_allowlist(tmp_path: Path, fake_claude_binary: Pat
 
 # --- missing file ------------------------------------------------------
 
+
 def test_load_missing_file(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         config_mod.load(tmp_path / "nope.yaml")
 
 
 # --- allowed_tools validation -----------------------------------------
+
 
 def test_load_refuses_missing_allowed_tools_key(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"
@@ -119,6 +122,7 @@ def test_load_refuses_overlap_allowed_and_forbidden(tmp_path: Path, fake_claude_
 
 
 # --- numeric bounds ----------------------------------------------------
+
 
 def test_load_refuses_zero_cost_cap(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"
@@ -194,6 +198,7 @@ def test_load_refuses_max_turns_out_of_range(tmp_path: Path, fake_claude_binary:
 
 # --- allowlist ---------------------------------------------------------
 
+
 def test_load_refuses_empty_allowlist(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"
     project = tmp_path / "proj"
@@ -218,6 +223,7 @@ def test_load_refuses_malformed_allowlist_entry(tmp_path: Path, fake_claude_bina
 
 # --- project_directory -------------------------------------------------
 
+
 def test_load_refuses_nonexistent_project_dir(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"
     data = _good_yaml(tmp_path / "doesnotexist", fake_claude_binary)
@@ -236,6 +242,7 @@ def test_load_refuses_relative_project_dir(tmp_path: Path, fake_claude_binary: P
 
 
 # --- claude_binary validation -----------------------------------------
+
 
 def test_load_refuses_missing_claude_binary(tmp_path: Path):
     cfg_path = tmp_path / "config.yaml"
@@ -263,6 +270,7 @@ def test_load_refuses_world_writable_claude_binary(tmp_path: Path):
 
 
 # --- session_aliases ---------------------------------------------------
+
 
 def test_load_no_aliases_section_defaults_empty(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"
@@ -432,6 +440,7 @@ def test_load_accepts_symlinked_claude_binary(tmp_path: Path):
 
 # --- Trust mode config parsing ------------------------------------------
 
+
 def test_trust_defaults_to_chat_only_when_missing(tmp_path: Path, fake_claude_binary: Path):
     """A config with no ``trust:`` block must keep the safe OSS default —
     chat_only for everything."""
@@ -502,6 +511,7 @@ def test_trust_per_alias_invalid_preset_refused(tmp_path: Path, fake_claude_bina
 
 
 # --- Memory backend config parsing --------------------------------------
+
 
 def test_memory_defaults_to_none_when_missing(tmp_path: Path, fake_claude_binary: Path):
     cfg_path = tmp_path / "config.yaml"

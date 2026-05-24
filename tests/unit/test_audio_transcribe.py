@@ -21,6 +21,7 @@ from src import audio_transcribe
 
 # --- is_audio_file ------------------------------------------------------
 
+
 def test_is_audio_file_recognizes_caf():
     assert audio_transcribe.is_audio_file("/tmp/voice.caf")
 
@@ -49,6 +50,7 @@ def test_is_audio_file_rejects_unknown_ext():
 
 # --- resolve_binary -----------------------------------------------------
 
+
 def test_resolve_binary_returns_none_when_missing(monkeypatch):
     monkeypatch.setattr(audio_transcribe.shutil, "which", lambda _name: None)
     assert audio_transcribe.resolve_binary() is None
@@ -56,7 +58,8 @@ def test_resolve_binary_returns_none_when_missing(monkeypatch):
 
 def test_resolve_binary_finds_whisper_cli(monkeypatch):
     monkeypatch.setattr(
-        audio_transcribe.shutil, "which",
+        audio_transcribe.shutil,
+        "which",
         lambda name: "/opt/homebrew/bin/whisper-cli" if name == "whisper-cli" else None,
     )
     assert audio_transcribe.resolve_binary() == Path("/opt/homebrew/bin/whisper-cli")
@@ -74,6 +77,7 @@ def test_resolve_binary_explicit_missing_returns_none(tmp_path):
 
 
 # --- transcribe ---------------------------------------------------------
+
 
 def _make_audio(tmp_path: Path, name: str = "voice.wav", size: int = 100) -> Path:
     p = tmp_path / name
@@ -99,9 +103,13 @@ def test_transcribe_returns_none_when_model_missing(tmp_path, monkeypatch):
     fake_bin.chmod(0o755)
     monkeypatch.setattr(audio_transcribe, "resolve_binary", lambda explicit=None: fake_bin)
     # Force model_path to a non-existent file:
-    assert audio_transcribe.transcribe(
-        str(audio), model_path=str(tmp_path / "nope.bin"),
-    ) is None
+    assert (
+        audio_transcribe.transcribe(
+            str(audio),
+            model_path=str(tmp_path / "nope.bin"),
+        )
+        is None
+    )
 
 
 def test_transcribe_returns_text_from_stdout(tmp_path, monkeypatch):
@@ -158,16 +166,18 @@ def test_transcribe_prefers_txt_sidecar_over_stdout(tmp_path, monkeypatch):
     def fake_run(argv, **_k):
         f_idx = argv.index("-f")
         whisper_input_path = Path(argv[f_idx + 1])
-        sidecar = whisper_input_path.with_suffix(
-            whisper_input_path.suffix + ".txt"
-        )
+        sidecar = whisper_input_path.with_suffix(whisper_input_path.suffix + ".txt")
         sidecar.write_text("sidecar transcript wins\n")
         return _Done()
 
     monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
-    assert audio_transcribe.transcribe(
-        str(audio), model_path=str(model),
-    ) == "sidecar transcript wins"
+    assert (
+        audio_transcribe.transcribe(
+            str(audio),
+            model_path=str(model),
+        )
+        == "sidecar transcript wins"
+    )
 
 
 def test_transcribe_returns_none_on_nonzero_exit(tmp_path, monkeypatch):
@@ -211,9 +221,11 @@ def test_transcribe_refuses_oversize_file(tmp_path, monkeypatch):
     with audio.open("wb") as f:
         f.seek(audio_transcribe.MAX_AUDIO_BYTES + 100)
         f.write(b"\0")
+
     # resolve_binary must NOT be called — we short-circuit on size.
     def boom(explicit=None):  # noqa: ARG001
         raise AssertionError("size-cap should short-circuit before binary lookup")
+
     monkeypatch.setattr(audio_transcribe, "resolve_binary", boom)
     assert audio_transcribe.transcribe(str(audio)) is None
 
@@ -268,6 +280,7 @@ def test_transcribe_caf_runs_afconvert_before_whisper(tmp_path, monkeypatch):
                 returncode = 0
                 stdout = b""
                 stderr = b""
+
             return _Done()
         # Second call: whisper-cli on the converted WAV.
 
@@ -275,12 +288,14 @@ def test_transcribe_caf_runs_afconvert_before_whisper(tmp_path, monkeypatch):
             returncode = 0
             stdout = b"hello world"
             stderr = b""
+
         return _Done()
 
     monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
     # Pretend afconvert exists.
     monkeypatch.setattr(
-        type(audio_transcribe.AFCONVERT_BIN), "is_file",
+        type(audio_transcribe.AFCONVERT_BIN),
+        "is_file",
         lambda _self: True,
     )
 
@@ -322,6 +337,7 @@ def test_transcribe_wav_staged_to_tempdir_not_processed_in_place(tmp_path, monke
             returncode = 0
             stdout = b"text"
             stderr = b""
+
         return _Done()
 
     monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)
@@ -353,7 +369,8 @@ def test_transcribe_returns_none_when_afconvert_fails(tmp_path, monkeypatch):
     model.write_bytes(b"x")
     monkeypatch.setattr(audio_transcribe, "resolve_binary", lambda explicit=None: fake_bin)
     monkeypatch.setattr(
-        audio_transcribe, "_transcode_to_wav",
+        audio_transcribe,
+        "_transcode_to_wav",
         lambda *_a, **_k: False,
     )
     whisper_called = [False]
@@ -365,6 +382,7 @@ def test_transcribe_returns_none_when_afconvert_fails(tmp_path, monkeypatch):
             returncode = 0
             stdout = b""
             stderr = b""
+
         return _Done()
 
     monkeypatch.setattr(audio_transcribe.subprocess, "run", fake_run)

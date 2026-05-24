@@ -75,28 +75,30 @@ DEFAULT_CLAUDE_BIN: Final = "/usr/local/bin/claude"
 # add any of these to config.yaml, the daemon refuses to start. This is the
 # config-layer floor — see HARD_DISALLOWED below for what we actually pass
 # to ``--disallowed-tools``.
-HARD_FORBIDDEN_TOOLS: Final = frozenset({
-    "Bash",
-    "Write",
-    "Edit",
-    "MultiEdit",
-    "NotebookEdit",
-    "WebFetch",
-    "WebSearch",
-    "Skill",
-    "Agent",
-    "ToolSearch",
-    "CronCreate",
-    "CronDelete",
-    "CronList",
-    "CronToggle",
-    "ScheduleWakeup",
-    "RemoteTrigger",
-    "PushNotification",
-    "EnterWorktree",
-    "ExitWorktree",
-    # MCP-namespaced tools blocked via prefix check, not exact match.
-})
+HARD_FORBIDDEN_TOOLS: Final = frozenset(
+    {
+        "Bash",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "WebFetch",
+        "WebSearch",
+        "Skill",
+        "Agent",
+        "ToolSearch",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "CronToggle",
+        "ScheduleWakeup",
+        "RemoteTrigger",
+        "PushNotification",
+        "EnterWorktree",
+        "ExitWorktree",
+        # MCP-namespaced tools blocked via prefix check, not exact match.
+    }
+)
 
 # Tools the bridge ACTIVELY tells claude to disallow on every invocation, via
 # ``--disallowed-tools``. ``--allowed-tools`` is additive (doesn't deny
@@ -107,40 +109,67 @@ HARD_FORBIDDEN_TOOLS: Final = frozenset({
 # Anything in allowed_tools is removed from this set at invocation time, so
 # a user who opts in to (e.g.) ``Read`` gets Read while everything else
 # stays denied.
-HARD_DISALLOWED: Final = frozenset({
-    # Filesystem write / exec
-    "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-    # Filesystem read (cwd-scoped but still surfaces filenames/contents)
-    "Read", "Grep", "Glob", "LS", "NotebookRead",
-    # Network egress
-    "WebFetch", "WebSearch",
-    # Tool/skill/agent loading — these can re-enable denied tools transitively
-    "Skill", "Agent", "ToolSearch",
-    # Scheduling — could persist arbitrary execution
-    "CronCreate", "CronDelete", "CronList", "CronToggle", "ScheduleWakeup",
-    # Communication / out-of-band
-    "AskUserQuestion", "RemoteTrigger", "PushNotification",
-    # Task / state / plan modes
-    "TodoWrite", "TaskStop", "TaskOutput",
-    "EnterWorktree", "ExitWorktree", "EnterPlanMode", "ExitPlanMode",
-    # MCP introspection (the empty mcp config should make these inert, but
-    # we deny anyway — defense in depth)
-    "ListMcpResourcesTool", "ReadMcpResourceTool",
-})
+HARD_DISALLOWED: Final = frozenset(
+    {
+        # Filesystem write / exec
+        "Bash",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        # Filesystem read (cwd-scoped but still surfaces filenames/contents)
+        "Read",
+        "Grep",
+        "Glob",
+        "LS",
+        "NotebookRead",
+        # Network egress
+        "WebFetch",
+        "WebSearch",
+        # Tool/skill/agent loading — these can re-enable denied tools transitively
+        "Skill",
+        "Agent",
+        "ToolSearch",
+        # Scheduling — could persist arbitrary execution
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "CronToggle",
+        "ScheduleWakeup",
+        # Communication / out-of-band
+        "AskUserQuestion",
+        "RemoteTrigger",
+        "PushNotification",
+        # Task / state / plan modes
+        "TodoWrite",
+        "TaskStop",
+        "TaskOutput",
+        "EnterWorktree",
+        "ExitWorktree",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        # MCP introspection (the empty mcp config should make these inert, but
+        # we deny anyway — defense in depth)
+        "ListMcpResourcesTool",
+        "ReadMcpResourceTool",
+    }
+)
 
 # argv tokens that, if present anywhere in argv, mean an unsafe invocation.
 # Refusal happens before exec. These should never be in argv constructed by
 # this module — the check is purely defense against future regressions or a
 # hijacked argv-building path.
-ARGV_DENYLIST: Final = frozenset({
-    "--dangerously-skip-permissions",
-    "--bypass-permissions",
-    "--no-permissions",
-    "--allow-dangerously-skip-permissions",
-    # Unsafe flag values that, if a malicious prompt somehow re-entered argv:
-    "--permission-mode=bypassPermissions",
-    "--permission-mode=acceptEdits",
-})
+ARGV_DENYLIST: Final = frozenset(
+    {
+        "--dangerously-skip-permissions",
+        "--bypass-permissions",
+        "--no-permissions",
+        "--allow-dangerously-skip-permissions",
+        # Unsafe flag values that, if a malicious prompt somehow re-entered argv:
+        "--permission-mode=bypassPermissions",
+        "--permission-mode=acceptEdits",
+    }
+)
 
 # Hard cap on prompt length we'll pass to claude. The reader already caps
 # at 16KB; this is a second layer.
@@ -171,15 +200,12 @@ def _validate_session_id(value: str) -> str:
     that hands us an upper-cased copy without weakening the regex.
     """
     if not isinstance(value, str):
-        raise RunnerConfigError(
-            f"session_id must be str, got {type(value).__name__}"
-        )
+        raise RunnerConfigError(f"session_id must be str, got {type(value).__name__}")
     canonical = value.strip().lower()
     if not _SESSION_ID_RE.match(canonical):
-        raise RunnerConfigError(
-            f"session_id does not match UUID shape: {value!r}"
-        )
+        raise RunnerConfigError(f"session_id does not match UUID shape: {value!r}")
     return canonical
+
 
 # Minimal system prompt injected via --append-system-prompt. Three jobs:
 # 1. Set a tight role so the model doesn't reference Gmail/Slack/Drive/etc.
@@ -217,7 +243,7 @@ BRIDGE_RESUME_SCOPE_PROMPT: Final = (
     "the user sent earlier — those are HISTORICAL, not part of the "
     "current message. Only attachments listed in the CURRENT user turn "
     "are present right now. Phrase any reference to past attachments in "
-    "past tense (\"the screenshot you sent yesterday\"), not as if the "
+    'past tense ("the screenshot you sent yesterday"), not as if the '
     "user just shared them again."
 )
 
@@ -231,15 +257,17 @@ BRIDGE_RESUME_SCOPE_PROMPT: Final = (
 # - ANTHROPIC_AUTH_TOKEN: redundant with CLAUDE_CODE_OAUTH_TOKEN on modern
 #   installs, and having both reachable risks claude picking the wrong
 #   account when both are set. We only pass through one OAuth path.
-_ENV_ALLOWLIST: Final = frozenset({
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "LC_ALL",
-    "ANTHROPIC_API_KEY",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-})
+_ENV_ALLOWLIST: Final = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    }
+)
 
 # Claude Code records every session as a JSONL transcript at
 # ``~/.claude/projects/<encoded-cwd>/<session_id>.jsonl``. The encoded
@@ -257,7 +285,9 @@ class ClaudeResult:
     cost_usd: float
     duration_ms: int
     error: Optional[str] = None
-    error_category: Optional[str] = None  # "timeout" | "exec_error" | "json_parse" | "claude_error" | "resume_missing"
+    error_category: Optional[str] = (
+        None  # "timeout" | "exec_error" | "json_parse" | "claude_error" | "resume_missing"
+    )
     # Permission denials reported by claude in the JSON output. Each entry
     # is the raw dict from `parsed["permission_denials"]` — usually
     # `{"tool_name": "Edit", "tool_input": {"file_path": "..."}}` or
@@ -276,9 +306,7 @@ def _validate_tool_list(tools: list[str]) -> None:
     (means "no tools available" — pure text chat)."""
     bad = HARD_FORBIDDEN_TOOLS & set(tools)
     if bad:
-        raise RunnerConfigError(
-            f"allowed_tools includes hard-forbidden tools: {sorted(bad)}"
-        )
+        raise RunnerConfigError(f"allowed_tools includes hard-forbidden tools: {sorted(bad)}")
     mcp = [t for t in tools if t.startswith("mcp__")]
     if mcp:
         raise RunnerConfigError(
@@ -287,9 +315,7 @@ def _validate_tool_list(tools: list[str]) -> None:
         )
 
 
-def _assert_safe_argv(
-    argv: list[str], *, allow_overrides: Optional[frozenset] = None
-) -> None:
+def _assert_safe_argv(argv: list[str], *, allow_overrides: Optional[frozenset] = None) -> None:
     """Refuse to exec argv containing any denylisted token (exact or prefix).
 
     The prefix-form (``--flag=value``) check derives from ARGV_DENYLIST
@@ -312,27 +338,25 @@ def _assert_safe_argv(
     overrides = allow_overrides or frozenset()
     # Floor: no caller, no override, ever permits these. They disable
     # Claude Code's own permission system entirely (not just one file).
-    _PERMANENTLY_REFUSED = frozenset({
-        "--dangerously-skip-permissions",
-        "--bypass-permissions",
-        "--no-permissions",
-        "--allow-dangerously-skip-permissions",
-        "--permission-mode=bypassPermissions",
-    })
+    _PERMANENTLY_REFUSED = frozenset(
+        {
+            "--dangerously-skip-permissions",
+            "--bypass-permissions",
+            "--no-permissions",
+            "--allow-dangerously-skip-permissions",
+            "--permission-mode=bypassPermissions",
+        }
+    )
     for tok in argv:
         if not isinstance(tok, str):
             raise RunnerConfigError(f"non-string argv element: {tok!r}")
         if tok in _PERMANENTLY_REFUSED:
-            raise RunnerConfigError(
-                f"refusing argv with permanently-denied token: {tok!r}"
-            )
+            raise RunnerConfigError(f"refusing argv with permanently-denied token: {tok!r}")
         if tok in ARGV_DENYLIST and tok not in overrides:
             raise RunnerConfigError(f"refusing argv with denylisted token: {tok!r}")
         for bad in _bare:
             if bad in _PERMANENTLY_REFUSED and tok.startswith(bad + "="):
-                raise RunnerConfigError(
-                    f"refusing argv with permanently-denied flag form: {tok!r}"
-                )
+                raise RunnerConfigError(f"refusing argv with permanently-denied flag form: {tok!r}")
             if tok.startswith(bad + "=") and tok not in overrides:
                 raise RunnerConfigError(f"refusing argv with denylisted flag form: {tok!r}")
 
@@ -345,9 +369,7 @@ def _assert_safe_argv(
     try:
         sep_idx = argv.index("--")
     except ValueError:
-        raise RunnerConfigError(
-            "argv missing '--' separator before the prompt"
-        ) from None
+        raise RunnerConfigError("argv missing '--' separator before the prompt") from None
     if sep_idx != len(argv) - 2:
         raise RunnerConfigError(
             f"argv has '--' at index {sep_idx} but argv length is "
@@ -523,8 +545,7 @@ def _resolve_inherit_mcp_path(configured: Optional[str]) -> Optional[str]:
         return None
     if p.is_symlink():
         logger.warning(
-            "MCP config inherit path %s is a symlink; refusing (S9). "
-            "Falling back to empty.",
+            "MCP config inherit path %s is a symlink; refusing (S9). " "Falling back to empty.",
             p,
         )
         return None
@@ -629,7 +650,10 @@ def run_claude(
                 _write_empty_mcp_safe(mcp_path)
             except OSError as e:
                 return ClaudeResult(
-                    success=False, reply="", session_id=None, cost_usd=0.0,
+                    success=False,
+                    reply="",
+                    session_id=None,
+                    cost_usd=0.0,
                     duration_ms=int((time.time() - start) * 1000),
                     error=f"could not write empty-mcp.json: {e}",
                     error_category="exec_error",
@@ -645,7 +669,10 @@ def run_claude(
                     _write_empty_mcp_safe(mcp_path)
                 except OSError as e:
                     return ClaudeResult(
-                        success=False, reply="", session_id=None, cost_usd=0.0,
+                        success=False,
+                        reply="",
+                        session_id=None,
+                        cost_usd=0.0,
                         duration_ms=int((time.time() - start) * 1000),
                         error=f"could not write fallback empty-mcp.json: {e}",
                         error_category="exec_error",
@@ -658,9 +685,7 @@ def run_claude(
                 # the user's real config is what we want claude to load.
                 strict_mcp = False
         else:
-            raise RunnerConfigError(
-                f"unknown mcp_config_mode {trust_preset.mcp_config_mode!r}"
-            )
+            raise RunnerConfigError(f"unknown mcp_config_mode {trust_preset.mcp_config_mode!r}")
 
         # Determine cwd. Hermetic mode uses the side_dir; project mode
         # uses the user's configured project_directory (where CLAUDE.md
@@ -674,19 +699,22 @@ def run_claude(
             # legitimate user session and should be preserved.
             sandbox_for_cleanup = None
         else:
-            raise RunnerConfigError(
-                f"unknown cwd_mode {trust_preset.cwd_mode!r}"
-            )
+            raise RunnerConfigError(f"unknown cwd_mode {trust_preset.cwd_mode!r}")
 
         # Build argv.
         argv = [
             claude_bin,
             "-p",
-            "--output-format", "json",
-            "--mcp-config", mcp_path_str,
-            "--disallowed-tools", disallow_value,
-            "--allowed-tools", allow_value,
-            "--max-turns", str(int(trust_preset.max_turns)),
+            "--output-format",
+            "json",
+            "--mcp-config",
+            mcp_path_str,
+            "--disallowed-tools",
+            disallow_value,
+            "--allowed-tools",
+            allow_value,
+            "--max-turns",
+            str(int(trust_preset.max_turns)),
         ]
         if strict_mcp:
             argv.append("--strict-mcp-config")
@@ -718,11 +746,7 @@ def run_claude(
         if accept_edits or permission_relay_retry:
             argv.append("--permission-mode=acceptEdits")
             argv_overrides = frozenset({"--permission-mode=acceptEdits"})
-        if (
-            accept_edits
-            and not permission_relay_retry
-            and protected_files
-        ):
+        if accept_edits and not permission_relay_retry and protected_files:
             deny_rules: list[str] = []
             for raw_path in protected_files:
                 # Expand ~ so a config entry like "~/.claude/CLAUDE.md"
@@ -769,7 +793,10 @@ def run_claude(
             )
         except OSError as e:
             return ClaudeResult(
-                success=False, reply="", session_id=None, cost_usd=0.0,
+                success=False,
+                reply="",
+                session_id=None,
+                cost_usd=0.0,
                 duration_ms=int((time.time() - start) * 1000),
                 error=f"spawn failed: {e}",
                 error_category="exec_error",
@@ -780,10 +807,12 @@ def run_claude(
         except subprocess.TimeoutExpired:
             _kill_process_group(proc)
             duration = int((time.time() - start) * 1000)
-            logger.warning("claude -p timeout after %ds; killed process group",
-                           timeout_seconds)
+            logger.warning("claude -p timeout after %ds; killed process group", timeout_seconds)
             return ClaudeResult(
-                success=False, reply="", session_id=None, cost_usd=0.0,
+                success=False,
+                reply="",
+                session_id=None,
+                cost_usd=0.0,
                 duration_ms=duration,
                 error=f"timeout after {timeout_seconds}s",
                 error_category="timeout",
@@ -796,8 +825,9 @@ def run_claude(
 
     try:
         if proc.returncode != 0:
-            logger.warning("claude -p exit=%d stderr_tail=%r",
-                           proc.returncode, (stderr or "")[-500:])
+            logger.warning(
+                "claude -p exit=%d stderr_tail=%r", proc.returncode, (stderr or "")[-500:]
+            )
             # Detect the specific "stale session" error so the daemon can
             # auto-recover (clear the per-handle pointer + retry fresh).
             # Claude's exit-1 message format is stable enough to match
@@ -809,19 +839,26 @@ def run_claude(
                 try:
                     stderr_text = (
                         stderr.decode("utf-8", errors="replace")
-                        if isinstance(stderr, bytes) else stderr
+                        if isinstance(stderr, bytes)
+                        else stderr
                     )
                 except Exception:
                     stderr_text = ""
             if resume_session_id and "No conversation found" in stderr_text:
                 return ClaudeResult(
-                    success=False, reply="", session_id=None, cost_usd=0.0,
+                    success=False,
+                    reply="",
+                    session_id=None,
+                    cost_usd=0.0,
                     duration_ms=duration,
                     error=f"resume session {resume_session_id[:8]} not on disk",
                     error_category="resume_missing",
                 )
             return ClaudeResult(
-                success=False, reply="", session_id=None, cost_usd=0.0,
+                success=False,
+                reply="",
+                session_id=None,
+                cost_usd=0.0,
                 duration_ms=duration,
                 error=f"claude exit {proc.returncode}",
                 error_category="exec_error",
@@ -830,10 +867,12 @@ def run_claude(
         try:
             parsed = json.loads(stdout)
         except json.JSONDecodeError as e:
-            logger.warning("claude JSON parse failed: %s; stdout_head=%r",
-                           e, (stdout or "")[:500])
+            logger.warning("claude JSON parse failed: %s; stdout_head=%r", e, (stdout or "")[:500])
             return ClaudeResult(
-                success=False, reply="", session_id=None, cost_usd=0.0,
+                success=False,
+                reply="",
+                session_id=None,
+                cost_usd=0.0,
                 duration_ms=duration,
                 error=f"json parse failed: {e}",
                 error_category="json_parse",
@@ -841,7 +880,10 @@ def run_claude(
 
         if not isinstance(parsed, dict):
             return ClaudeResult(
-                success=False, reply="", session_id=None, cost_usd=0.0,
+                success=False,
+                reply="",
+                session_id=None,
+                cost_usd=0.0,
                 duration_ms=duration,
                 error="claude JSON output was not a dict",
                 error_category="json_parse",
@@ -853,7 +895,10 @@ def run_claude(
 
         if parsed.get("is_error"):
             return ClaudeResult(
-                success=False, reply="", session_id=None, cost_usd=0.0,
+                success=False,
+                reply="",
+                session_id=None,
+                cost_usd=0.0,
                 duration_ms=duration,
                 error=f"claude reported is_error: {parsed.get('subtype','?')}",
                 error_category="claude_error",
@@ -891,12 +936,14 @@ def run_claude(
         # continuation works in trust mode).
         if sandbox_for_cleanup is not None:
             _cleanup_sandbox_session(
-                sandbox_for_cleanup, session_id_for_cleanup,
+                sandbox_for_cleanup,
+                session_id_for_cleanup,
                 projects_root=DEFAULT_PROJECTS_ROOT,
             )
 
 
 # --- Startup self-test ----------------------------------------------------
+
 
 class SelfTestFailed(RuntimeError):
     """Raised when the startup self-test cannot prove Bash is denied."""
@@ -941,6 +988,7 @@ def selftest_bash_denied(
         # load time. By the time this function runs, both modules are
         # fully loaded.
         from .trust import PRESET_CHAT_ONLY
+
         result = run_claude(
             test_prompt,
             trust_preset=PRESET_CHAT_ONLY,
@@ -967,7 +1015,8 @@ def selftest_bash_denied(
 
         logger.info(
             "selftest: bash denied (canary absent, cost=$%.4f, duration=%dms)",
-            result.cost_usd, result.duration_ms,
+            result.cost_usd,
+            result.duration_ms,
         )
 
     # The selftest's claude call wrote a JSONL transcript under
@@ -1045,8 +1094,7 @@ def selftest_allowlist_enforced(
             f"handle {fake_sender!r} was ACCEPTED (reason: {reason!r}). "
             "The allowlist gate is not working. Refusing to start."
         )
-    logger.info("selftest: allowlist enforced (synthetic %s rejected as %s)",
-                fake_sender, reason)
+    logger.info("selftest: allowlist enforced (synthetic %s rejected as %s)", fake_sender, reason)
 
 
 def selftest_argv_invariants() -> None:
@@ -1085,5 +1133,4 @@ def selftest_argv_invariants() -> None:
                 "accepted; the =value injection vector is open. "
                 "Refusing to start."
             )
-    logger.info("selftest: argv invariants hold (%d dangerous flags rejected)",
-                len(ARGV_DENYLIST))
+    logger.info("selftest: argv invariants hold (%d dangerous flags rejected)", len(ARGV_DENYLIST))

@@ -17,10 +17,15 @@ from types import SimpleNamespace
 from src import daemon, imessage_reader
 
 
-def _msg(handle: str, *, body: str = "hi", is_group: bool = False,
-         chat_guid: str = "1:1", has_attachment: bool = False,
-         attachment_paths: tuple = (),
-         ) -> imessage_reader.Message:
+def _msg(
+    handle: str,
+    *,
+    body: str = "hi",
+    is_group: bool = False,
+    chat_guid: str = "1:1",
+    has_attachment: bool = False,
+    attachment_paths: tuple = (),
+) -> imessage_reader.Message:
     return imessage_reader.Message(
         rowid=1,
         chat_guid=chat_guid,
@@ -59,6 +64,7 @@ def _cfg(*, allowlist=("+15551234567",), groups=()) -> SimpleNamespace:
 
 
 # --- _decide -----------------------------------------------------------
+
 
 def test_decide_accepts_allowlisted():
     accept, reason = daemon._decide(_msg("+15551234567"), _cfg())
@@ -106,6 +112,7 @@ def test_decide_normalizes_email_case():
 
 # --- _classify ---------------------------------------------------------
 
+
 def test_classify_command():
     assert daemon._classify("/help") == "command"
     assert daemon._classify("/sessions --all") == "command"
@@ -118,15 +125,16 @@ def test_classify_text():
 
 # --- _user_facing_error: redaction ------------------------------------
 
+
 def test_user_facing_error_never_leaks_failure_count():
     """The user-facing error message must NOT include a number that would
     let an attacker probe the circuit-breaker threshold."""
     for cat in ("timeout", "exec_error", "json_parse", "claude_error", None, "unknown"):
         msg = daemon._user_facing_error(cat)
         # No digits 0-9 should appear; the user message is purely descriptive.
-        assert not any(c.isdigit() for c in msg), (
-            f"category {cat!r} returned {msg!r} — leaks a number"
-        )
+        assert not any(
+            c.isdigit() for c in msg
+        ), f"category {cat!r} returned {msg!r} — leaks a number"
 
 
 def test_user_facing_error_returns_canned_strings():
@@ -143,6 +151,7 @@ def test_user_facing_error_unknown_category_falls_back():
 
 # --- _normalize_for_allowlist -----------------------------------------
 
+
 def test_normalize_for_allowlist_email_lowercased():
     assert daemon._normalize_for_allowlist("User@Example.COM") == "user@example.com"
 
@@ -156,6 +165,7 @@ def test_normalize_for_allowlist_invalid_returns_empty():
 
 
 # --- Audit-row redaction regression (round-4 adversarial finding) ------
+
 
 def test_self_send_echo_recorded_and_detected():
     """Track outbound bodies in the in-memory ring; the same (handle, body)
@@ -187,7 +197,8 @@ def test_self_send_echo_ttl_expires(monkeypatch):
     # Pretend time advanced past the TTL.
     real_time = daemon.time.time
     monkeypatch.setattr(
-        daemon.time, "time",
+        daemon.time,
+        "time",
         lambda: real_time() + daemon.RECENT_SELF_SEND_TTL_SECONDS + 1,
     )
     assert not daemon._is_recent_self_send(handle, body)
@@ -210,7 +221,7 @@ def test_dedupe_handles_smart_quotes():
     """
     daemon._recent_self_sends.clear()
     handle = "+15551234567"
-    sent = "Yes, I'll handle the \"peptides\" log update."
+    sent = 'Yes, I\'ll handle the "peptides" log update.'
     daemon._record_self_send(handle, sent)
     # iCloud echoed back with curly quotes / em-dash
     echoed = "Yes, I’ll handle the “peptides” log update."
@@ -247,10 +258,13 @@ def test_dedupe_em_dash_normalized():
 
 # --- Outbound-rate auto-PAUSE safety net --------------------------------
 
+
 class _PauseSpy:
     """Drop-in replacement for state.trip_pause that records calls."""
+
     def __init__(self):
         self.calls: list = []
+
     def __call__(self, *args, **kwargs):
         self.calls.append(kwargs.get("reason", ""))
 
@@ -291,6 +305,7 @@ def test_outbound_rate_per_handle_isolated(monkeypatch):
 def test_outbound_rate_window_slides(monkeypatch):
     """Old sends outside the window are pruned and shouldn't count."""
     import time as _time
+
     spy = _PauseSpy()
     monkeypatch.setattr(daemon.state, "trip_pause", spy)
     daemon._recent_self_sends.clear()
@@ -339,18 +354,17 @@ def test_audit_failure_detail_string_redacted():
     # fine and documented. Look for the failure-path template.
     # The forbidden tokens MUST NOT appear in the audit detail builder
     # for failure rows.
-    assert "consec=" not in source or "consec=%d" in source, (
-        "audit_log.detail leaks consecutive-failure count — must move to logger"
-    )
-    assert "raw={result.error" not in source, (
-        "audit_log.detail leaks raw error string — must move to logger"
-    )
-    assert "raw=%r" in source, (
-        "expected the raw error to be logged server-side via logger.warning"
-    )
+    assert (
+        "consec=" not in source or "consec=%d" in source
+    ), "audit_log.detail leaks consecutive-failure count — must move to logger"
+    assert (
+        "raw={result.error" not in source
+    ), "audit_log.detail leaks raw error string — must move to logger"
+    assert "raw=%r" in source, "expected the raw error to be logged server-side via logger.warning"
 
 
 # --- --skip-selftest dev flag ------------------------------------------
+
 
 def _parser_for_skip_selftest_test():
     """Reconstruct the daemon's argparse for the parsing-only tests."""
@@ -373,6 +387,7 @@ def test_skip_selftest_accepted_interactive(monkeypatch, tmp_path, fake_claude_b
     # behavior is tested via the not-a-tty case below; this guards against
     # a future refactor that removes the guard entirely.
     import inspect
+
     source = inspect.getsource(daemon.main)
     assert "skip_selftest" in source
     assert "isatty" in source
@@ -384,25 +399,30 @@ def test_skip_selftest_refused_when_not_tty(monkeypatch, tmp_path, fake_claude_b
     accidental embedding in a launchd plist / systemd unit / cron job."""
     # Write a minimal valid config so load() succeeds.
     import yaml
+
     project = tmp_path / "proj"
     project.mkdir()
     cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "project_directory": str(project),
-        "allowlist": ["+15551234567"],
-        "allow_group_chat_guids": [],
-        "allowed_tools": [],
-        "forbidden_tools": [],
-        "poll_interval_seconds": 3.0,
-        "reply_rate_limit_per_minute": 10,
-        "daily_cost_cap_usd": 5.0,
-        "per_call_cost_cap_usd": 0.50,
-        "per_call_max_turns": 1,
-        "per_call_timeout_seconds": 90,
-        "circuit_breaker_failures": 5,
-        "claude_binary": str(fake_claude_binary),
-        "debug": False,
-    }))
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "project_directory": str(project),
+                "allowlist": ["+15551234567"],
+                "allow_group_chat_guids": [],
+                "allowed_tools": [],
+                "forbidden_tools": [],
+                "poll_interval_seconds": 3.0,
+                "reply_rate_limit_per_minute": 10,
+                "daily_cost_cap_usd": 5.0,
+                "per_call_cost_cap_usd": 0.50,
+                "per_call_max_turns": 1,
+                "per_call_timeout_seconds": 90,
+                "circuit_breaker_failures": 5,
+                "claude_binary": str(fake_claude_binary),
+                "debug": False,
+            }
+        )
+    )
 
     # Point state.DEFAULT_STATE_DIR at a tmp dir so init_state_dir doesn't
     # touch the real ~/.claude-imessage-bridge/.
@@ -420,6 +440,7 @@ def test_skip_selftest_refused_when_not_tty(monkeypatch, tmp_path, fake_claude_b
 
 
 # --- Pause refactor: claude path gated, command path not -------------
+
 
 def test_read_pause_reason_returns_first_line(tmp_path):
     state_dir = tmp_path / "state"
@@ -440,6 +461,7 @@ def test_daemon_main_loop_no_longer_top_level_pause_check():
     If a future refactor restores it, /resume becomes unreachable via
     iMessage — guard the refactor with this test."""
     import inspect
+
     source = inspect.getsource(daemon.main)
     # The string "PAUSE file present, idling" used to be the top-of-loop
     # log line. Its absence is the invariant we care about.
@@ -452,6 +474,7 @@ def test_daemon_main_loop_no_longer_top_level_pause_check():
 
 # --- Image / attachment handling ---------------------------------------
 
+
 class _SendSpy:
     def __init__(self):
         self.sent: list = []
@@ -462,6 +485,7 @@ class _SendSpy:
 
 class _RunClaudeSpy:
     """Captures the prompt run_claude was called with, returns a stub result."""
+
     def __init__(self):
         self.calls: list = []
 
@@ -469,9 +493,15 @@ class _RunClaudeSpy:
         self.calls.append((prompt, kwargs))
         # Minimal ClaudeResult-compatible stub
         from src.claude_runner import ClaudeResult
+
         return ClaudeResult(
-            success=True, reply="ok", session_id="sid-abc", cost_usd=0.0,
-            duration_ms=10, error=None, error_category=None,
+            success=True,
+            reply="ok",
+            session_id="sid-abc",
+            cost_usd=0.0,
+            duration_ms=10,
+            error=None,
+            error_category=None,
         )
 
 
@@ -480,7 +510,9 @@ def _stub_state_for_handle_one(monkeypatch):
     a real state.db. Returns nothing — caller still patches sender/etc."""
     monkeypatch.setattr(daemon.state, "audit", lambda **_: None)
     monkeypatch.setattr(
-        daemon.state, "reserve_reply_slot", lambda handle, limit: (True, 1),
+        daemon.state,
+        "reserve_reply_slot",
+        lambda handle, limit: (True, 1),
     )
     monkeypatch.setattr(daemon.state, "get_pending_intent", lambda handle: None)
     monkeypatch.setattr(daemon.state, "clear_pending_intent", lambda handle: None)
@@ -504,7 +536,10 @@ def test_image_no_resolved_path_no_caption_silent_drop(monkeypatch):
     monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
 
     msg = _msg(
-        "+15551234567", body="", has_attachment=True, attachment_paths=(),
+        "+15551234567",
+        body="",
+        has_attachment=True,
+        attachment_paths=(),
     )
     daemon._handle_one(msg, _cfg())
 
@@ -559,7 +594,9 @@ def test_image_with_resolved_path_calls_claude_with_augmented_prompt(monkeypatch
 
     path = "/Users/samgobrail/Library/Messages/Attachments/ab/12/foo.jpeg"
     msg = _msg(
-        "+15551234567", body="what is this?", has_attachment=True,
+        "+15551234567",
+        body="what is this?",
+        has_attachment=True,
         attachment_paths=(path,),
     )
     cfg = _cfg()
@@ -585,7 +622,9 @@ def test_image_only_no_caption_calls_claude(monkeypatch):
 
     path = "/Users/samgobrail/Library/Messages/Attachments/cd/34/bar.png"
     msg = _msg(
-        "+15551234567", body="", has_attachment=True,
+        "+15551234567",
+        body="",
+        has_attachment=True,
         attachment_paths=(path,),
     )
     daemon._handle_one(msg, _cfg())
@@ -597,6 +636,7 @@ def test_image_only_no_caption_calls_claude(monkeypatch):
 
 
 # --- Inbound batching window -------------------------------------------
+
 
 def _clear_batches():
     daemon._pending_batches.clear()
@@ -618,17 +658,24 @@ def test_merge_batch_text_then_image(monkeypatch):
     message: bodies concatenated, attachment_paths preserved, rowid +
     timestamp from the last message."""
     text_msg = imessage_reader.Message(
-        rowid=10, chat_guid="c1", is_group=False,
+        rowid=10,
+        chat_guid="c1",
+        is_group=False,
         sender_handle="+15551234567",
         timestamp_iso="2026-05-17T12:00:00Z",
-        body="look at this", body_truncated=False,
-        has_attachment=False, attachment_paths=(),
+        body="look at this",
+        body_truncated=False,
+        has_attachment=False,
+        attachment_paths=(),
     )
     img_msg = imessage_reader.Message(
-        rowid=11, chat_guid="c1", is_group=False,
+        rowid=11,
+        chat_guid="c1",
+        is_group=False,
         sender_handle="+15551234567",
         timestamp_iso="2026-05-17T12:00:01Z",
-        body="", body_truncated=False,
+        body="",
+        body_truncated=False,
         has_attachment=True,
         attachment_paths=("/tmp/img.jpeg",),
     )
@@ -648,13 +695,19 @@ def test_merge_batch_dedupes_and_caps_attachments():
     # Build cap+3 unique paths spread across 3 messages, plus a dup
     paths = [f"/tmp/img_{i}.jpeg" for i in range(cap + 3)]
     for i, p in enumerate(paths):
-        msgs.append(imessage_reader.Message(
-            rowid=100 + i, chat_guid="c1", is_group=False,
-            sender_handle="+15551234567",
-            timestamp_iso="2026-05-17T12:00:00Z",
-            body="", body_truncated=False,
-            has_attachment=True, attachment_paths=(p, paths[0]),  # dup paths[0]
-        ))
+        msgs.append(
+            imessage_reader.Message(
+                rowid=100 + i,
+                chat_guid="c1",
+                is_group=False,
+                sender_handle="+15551234567",
+                timestamp_iso="2026-05-17T12:00:00Z",
+                body="",
+                body_truncated=False,
+                has_attachment=True,
+                attachment_paths=(p, paths[0]),  # dup paths[0]
+            )
+        )
     merged = daemon._merge_batch(msgs)
     assert len(merged.attachment_paths) == cap
     # paths[0] appears exactly once despite being in every message
@@ -674,8 +727,7 @@ def test_enqueue_then_flush_invokes_handle_one_once(monkeypatch):
     daemon._recent_outbound.clear()
 
     a = _msg("+15551234567", body="look")
-    b = _msg("+15551234567", body="at this", has_attachment=True,
-             attachment_paths=("/tmp/x.jpeg",))
+    b = _msg("+15551234567", body="at this", has_attachment=True, attachment_paths=("/tmp/x.jpeg",))
     daemon._enqueue_message(a, _cfg())
     daemon._enqueue_message(b, _cfg())
     # Both buffered, no claude call yet.
@@ -783,14 +835,17 @@ def test_enqueue_separate_handles_separate_batches():
     a = _msg("+15551111111", body="from a")
     b = _msg("+15552222222", body="from b")
     # Force enqueue path (skipping _handle_one).
-    daemon._pending_batches.setdefault(a.sender_handle.lower(),
-                                       daemon._PendingBatch()).msgs.append(a)
-    daemon._pending_batches.setdefault(b.sender_handle.lower(),
-                                       daemon._PendingBatch()).msgs.append(b)
+    daemon._pending_batches.setdefault(a.sender_handle.lower(), daemon._PendingBatch()).msgs.append(
+        a
+    )
+    daemon._pending_batches.setdefault(b.sender_handle.lower(), daemon._PendingBatch()).msgs.append(
+        b
+    )
     assert len(daemon._pending_batches) == 2
 
 
 # --- Audio attachment handling -----------------------------------------
+
 
 def test_audio_unconfigured_sends_setup_hint(monkeypatch):
     """Voice note arrives, whisper.cpp not installed → send a one-time
@@ -804,11 +859,12 @@ def test_audio_unconfigured_sends_setup_hint(monkeypatch):
     monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
     monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
     # Force transcription failure (whisper not installed).
-    monkeypatch.setattr(daemon.audio_transcribe, "transcribe",
-                        lambda *_a, **_k: None)
+    monkeypatch.setattr(daemon.audio_transcribe, "transcribe", lambda *_a, **_k: None)
 
     msg = _msg(
-        "+15551234567", body="", has_attachment=True,
+        "+15551234567",
+        body="",
+        has_attachment=True,
         attachment_paths=("/tmp/voice.caf",),
     )
     daemon._handle_one(msg, _cfg())
@@ -833,12 +889,15 @@ def test_audio_transcribed_inlines_transcript_in_prompt(monkeypatch):
     monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
     monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
     monkeypatch.setattr(
-        daemon.audio_transcribe, "transcribe",
+        daemon.audio_transcribe,
+        "transcribe",
         lambda path, **_k: "remember to call the doctor at 3pm",
     )
 
     msg = _msg(
-        "+15551234567", body="", has_attachment=True,
+        "+15551234567",
+        body="",
+        has_attachment=True,
         attachment_paths=("/tmp/voice.caf",),
     )
     daemon._handle_one(msg, _cfg())
@@ -864,12 +923,15 @@ def test_audio_with_image_combo_inlines_transcript_and_keeps_image_path(monkeypa
     monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
     monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
     monkeypatch.setattr(
-        daemon.audio_transcribe, "transcribe",
+        daemon.audio_transcribe,
+        "transcribe",
         lambda path, **_k: "look at the chart I just sent",
     )
 
     msg = _msg(
-        "+15551234567", body="", has_attachment=True,
+        "+15551234567",
+        body="",
+        has_attachment=True,
         attachment_paths=("/tmp/voice.caf", "/tmp/chart.png"),
     )
     daemon._handle_one(msg, _cfg())
@@ -894,8 +956,7 @@ def test_audio_with_caption_falls_through_when_transcribe_fails(monkeypatch):
     runner_spy = _RunClaudeSpy()
     monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
     monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
-    monkeypatch.setattr(daemon.audio_transcribe, "transcribe",
-                        lambda *_a, **_k: None)
+    monkeypatch.setattr(daemon.audio_transcribe, "transcribe", lambda *_a, **_k: None)
 
     msg = _msg(
         "+15551234567",

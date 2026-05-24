@@ -19,12 +19,16 @@ from src import imessage_sender
 
 # --- validate_handle ----------------------------------------------------
 
-@pytest.mark.parametrize("good", [
-    "+15551234567",
-    "+447911123456",
-    "user@example.com",
-    "first.last+tag@sub.example.co",
-])
+
+@pytest.mark.parametrize(
+    "good",
+    [
+        "+15551234567",
+        "+447911123456",
+        "user@example.com",
+        "first.last+tag@sub.example.co",
+    ],
+)
 def test_validate_handle_accepts_valid_formats(good):
     out = imessage_sender.validate_handle(good)
     assert out  # non-empty
@@ -38,17 +42,20 @@ def test_validate_handle_preserves_phone_case_unchanged():
     assert imessage_sender.validate_handle("+15551234567") == "+15551234567"
 
 
-@pytest.mark.parametrize("bad", [
-    "",
-    "5551234567",          # missing +
-    "+0123456789",         # leading 0 after +
-    "+1 555 123 4567",     # spaces
-    "user@@example.com",   # double @
-    "user@nope",           # no TLD
-    "user @example.com",   # internal space
-    "user\nname@x.com",    # newline
-    "user@x.c",            # short TLD
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "5551234567",  # missing +
+        "+0123456789",  # leading 0 after +
+        "+1 555 123 4567",  # spaces
+        "user@@example.com",  # double @
+        "user@nope",  # no TLD
+        "user @example.com",  # internal space
+        "user\nname@x.com",  # newline
+        "user@x.c",  # short TLD
+    ],
+)
 def test_validate_handle_rejects_bad_formats(bad):
     with pytest.raises(imessage_sender.HandleError):
         imessage_sender.validate_handle(bad)
@@ -64,6 +71,7 @@ def test_validate_handle_strips_whitespace():
 
 
 # --- Display attack stripping ------------------------------------------
+
 
 def test_strip_display_attacks_removes_bidi():
     body = "Hello ‮ world"  # RTL override
@@ -104,6 +112,7 @@ def test_strip_display_attacks_preserves_normal_unicode():
 
 # --- Truncation --------------------------------------------------------
 
+
 def test_truncate_short_body_unchanged():
     body = "hi there"
     assert imessage_sender._truncate(body) == body
@@ -127,6 +136,7 @@ def test_truncate_safe_utf8_boundary():
 
 
 # --- send() argv shape -------------------------------------------------
+
 
 def test_send_uses_argv_form(monkeypatch):
     captured = {}
@@ -166,7 +176,8 @@ def test_send_never_uses_shell(monkeypatch):
 
 def test_send_re_validates_handle(monkeypatch):
     monkeypatch.setattr(
-        imessage_sender.subprocess, "run",
+        imessage_sender.subprocess,
+        "run",
         lambda *a, **kw: subprocess.CompletedProcess(a, 0),
     )
     # SendRequest is a frozen dataclass; bypass to test defense-in-depth.
@@ -222,9 +233,7 @@ def test_send_dry_run_skips_subprocess(monkeypatch):
 
 def test_send_raises_on_osascript_failure(monkeypatch):
     def fake_run(argv, **kwargs):
-        return subprocess.CompletedProcess(
-            argv, returncode=1, stdout="", stderr="execution error"
-        )
+        return subprocess.CompletedProcess(argv, returncode=1, stdout="", stderr="execution error")
 
     monkeypatch.setattr(imessage_sender.subprocess, "run", fake_run)
     with pytest.raises(imessage_sender.SendError):
@@ -234,6 +243,7 @@ def test_send_raises_on_osascript_failure(monkeypatch):
 
 
 # --- Handle redaction --------------------------------------------------
+
 
 def test_redact_handle_email_masks_local():
     out = imessage_sender._redact_handle("alice.smith@example.com")

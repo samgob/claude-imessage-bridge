@@ -91,12 +91,17 @@ _recent_self_sends: Deque[Tuple[float, str, str]] = deque(maxlen=RECENT_SELF_SEN
 # bytes iCloud sync-echoes back. 2026-05-15 live test: only 1 of ~14 echoes
 # matched exact-bytes hash — overnight loop ensued. Normalize before
 # hashing so the echo dedupe survives those rewrites.
-_QUOTE_NORMALIZE = str.maketrans({
-    "‘": "'", "’": "'",   # curly singles
-    "“": '"', "”": '"',   # curly doubles
-    "–": "-", "—": "-",   # en/em dash
-    " ": " ",                  # non-breaking space
-})
+_QUOTE_NORMALIZE = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",  # curly singles
+        "“": '"',
+        "”": '"',  # curly doubles
+        "–": "-",
+        "—": "-",  # en/em dash
+        " ": " ",  # non-breaking space
+    }
+)
 
 
 def _normalize_for_dedupe(body: str) -> str:
@@ -208,6 +213,7 @@ MAX_BATCH_MSGS_PER_HANDLE: int = 20
 @dataclass
 class _PendingBatch:
     """Mutable per-handle buffer of inbound messages awaiting settle."""
+
     msgs: List = field(default_factory=list)
     last_arrival: float = 0.0
 
@@ -262,7 +268,8 @@ def _enqueue_message(msg, cfg) -> None:
                 _metrics["handler_exceptions"] += 1
                 logger.exception(
                     "handler error on batch-cap flush (size=%d): %s",
-                    len(popped.msgs), e,
+                    len(popped.msgs),
+                    e,
                 )
 
 
@@ -339,7 +346,8 @@ def _flush_settled_batches(cfg, *, force: bool = False) -> int:
             _metrics["handler_exceptions"] += 1
             logger.exception(
                 "handler error on merged batch (size=%d): %s",
-                len(batch.msgs), e,
+                len(batch.msgs),
+                e,
             )
     return len(settled)
 
@@ -359,9 +367,10 @@ def _check_outbound_rate(handle: str, redacted: str) -> bool:
     count = sum(1 for _, h in _recent_outbound if h == handle)
     if count > OUTBOUND_PAUSE_THRESHOLD:
         logger.error(
-            "outbound-rate safety net tripped for %s: %d sends in %ds — "
-            "creating PAUSE",
-            redacted, count, int(OUTBOUND_PAUSE_WINDOW_SECONDS),
+            "outbound-rate safety net tripped for %s: %d sends in %ds — " "creating PAUSE",
+            redacted,
+            count,
+            int(OUTBOUND_PAUSE_WINDOW_SECONDS),
         )
         _metrics["outbound_rate_pause_trips"] += 1
         try:
@@ -391,6 +400,7 @@ def _is_recent_self_send(handle: str, body: str) -> bool:
 # Boot-time
 # ---------------------------------------------------------------------------
 
+
 def _setup_logging(debug: bool) -> None:
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
@@ -405,6 +415,7 @@ def _install_signal_handlers() -> None:
         global _running
         logger.info("signal %s received, stopping", signum)
         _running = False
+
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
@@ -419,8 +430,7 @@ def _preflight(state_dir: Path) -> None:
     # 1. osascript at the pinned path.
     if not Path("/usr/bin/osascript").is_file():
         raise RuntimeError(
-            "/usr/bin/osascript missing — refuse to run "
-            "(unexpected macOS install state)"
+            "/usr/bin/osascript missing — refuse to run " "(unexpected macOS install state)"
         )
     # 2. Messages.app exists and is the Apple bundle.
     messages_app = Path("/System/Applications/Messages.app")
@@ -428,15 +438,11 @@ def _preflight(state_dir: Path) -> None:
         # Fall back to the older location on some macOS versions.
         messages_app = Path("/Applications/Messages.app")
     if not messages_app.is_dir():
-        raise RuntimeError(
-            "Messages.app not found in /System/Applications or /Applications"
-        )
+        raise RuntimeError("Messages.app not found in /System/Applications or /Applications")
     # 3. state.db not a symlink.
     db_path = state_dir / "state.db"
     if db_path.exists() and db_path.is_symlink():
-        raise RuntimeError(
-            f"{db_path} is a symlink; refuse to run (possible swap attack)"
-        )
+        raise RuntimeError(f"{db_path} is a symlink; refuse to run (possible swap attack)")
     # 4. config.yaml perms are not world/group readable (it has PII).
     cfg_path_str = os.environ.get("CIMB_CONFIG_PATH")
     if cfg_path_str:
@@ -445,8 +451,7 @@ def _preflight(state_dir: Path) -> None:
             mode = cfg_path.stat().st_mode & 0o777
             if mode & 0o077:
                 logger.warning(
-                    "config at %s is world/group-readable (mode %o); "
-                    "tighten to 0600",
+                    "config at %s is world/group-readable (mode %o); " "tighten to 0600",
                     cfg_path,
                     mode,
                 )
@@ -455,6 +460,7 @@ def _preflight(state_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Per-message processing
 # ---------------------------------------------------------------------------
+
 
 def _normalize_for_allowlist(handle: str) -> str:
     """Apply the same normalization the allowlist uses, returning '' if invalid."""
@@ -543,7 +549,8 @@ def _run_permission_relay_retry(
     )
     logger.info(
         "permission relay retry: resume %s for %s",
-        session_id[:8], redacted,
+        session_id[:8],
+        redacted,
     )
     try:
         result = claude_runner.run_claude(
@@ -590,7 +597,9 @@ def _run_permission_relay_retry(
         )
         logger.warning(
             "permission relay retry failed handle=%s category=%s raw=%r",
-            redacted, result.error_category, result.error,
+            redacted,
+            result.error_category,
+            result.error,
         )
 
     try:
@@ -599,7 +608,9 @@ def _run_permission_relay_retry(
         )
         _record_self_send(norm, reply_body)
         state.audit(
-            handle_redacted=redacted, direction="out", kind="reply",
+            handle_redacted=redacted,
+            direction="out",
+            kind="reply",
             detail=detail,
             reply_bytes=len(reply_body.encode("utf-8")),
             chatdb_rowid=chatdb_rowid,
@@ -659,7 +670,8 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         _metrics["self_send_echoes_skipped"] += 1
         logger.info(
             "skipping self-send echo from %s (rowid=%d)",
-            redacted, msg.rowid,
+            redacted,
+            msg.rowid,
         )
         state.audit(
             handle_redacted=redacted,
@@ -671,14 +683,14 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         return
 
     # Rate-limit: reserve a slot atomically (handles TOCTOU at the SQL layer).
-    granted, count = state.reserve_reply_slot(
-        norm, cfg.reply_rate_limit_per_minute
-    )
+    granted, count = state.reserve_reply_slot(norm, cfg.reply_rate_limit_per_minute)
     if not granted:
         _metrics["rate_limit_hits"] += 1
         logger.warning(
             "rate-limit hit for %s (%d/%d in window)",
-            redacted, count, cfg.reply_rate_limit_per_minute,
+            redacted,
+            count,
+            cfg.reply_rate_limit_per_minute,
         )
         state.audit(
             handle_redacted=redacted,
@@ -716,7 +728,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         if not caption:
             _metrics["attachment_phantom_dropped"] += 1
             state.audit(
-                handle_redacted=redacted, direction="in", kind="drop",
+                handle_redacted=redacted,
+                direction="in",
+                kind="drop",
                 detail="attachment-phantom-silent",
                 chatdb_rowid=msg.rowid,
             )
@@ -725,8 +739,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         # attachment markers so the downstream code path treats it as
         # plain text. The original chatdb_rowid is preserved for audit.
         logger.info(
-            "attachment had no resolvable path; processing caption only "
-            "for %s (rowid=%d)", redacted, msg.rowid,
+            "attachment had no resolvable path; processing caption only " "for %s (rowid=%d)",
+            redacted,
+            msg.rowid,
         )
         _metrics["attachment_no_path_fallback_to_text"] += 1
         msg = imessage_reader.Message(
@@ -744,13 +759,8 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     elif msg.has_attachment:
         # Partition attachments into audio (transcribable via whisper.cpp)
         # and non-audio (image/PDF/etc — claude reads with the Read tool).
-        audio_paths = [
-            p for p in msg.attachment_paths if audio_transcribe.is_audio_file(p)
-        ]
-        readable_paths = [
-            p for p in msg.attachment_paths
-            if not audio_transcribe.is_audio_file(p)
-        ]
+        audio_paths = [p for p in msg.attachment_paths if audio_transcribe.is_audio_file(p)]
+        readable_paths = [p for p in msg.attachment_paths if not audio_transcribe.is_audio_file(p)]
 
         # Transcribe audio. Failed transcriptions return None — surface a
         # setup-hint reply if EVERY audio file failed AND there's nothing
@@ -772,10 +782,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
 
         # All-audio message where transcription failed entirely and no
         # caption to fall back on → send a one-time setup hint.
-        if (
-            audio_paths and not transcripts
-            and not readable_paths and not caption
-        ):
+        if audio_paths and not transcripts and not readable_paths and not caption:
             hint = (
                 "🎙️ I got a voice note but transcription isn't set up. "
                 "Install whisper.cpp:\n"
@@ -791,7 +798,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
                 _record_self_send(norm, hint)
                 _metrics["audio_transcribe_unconfigured"] += 1
                 state.audit(
-                    handle_redacted=redacted, direction="out", kind="ack",
+                    handle_redacted=redacted,
+                    direction="out",
+                    kind="ack",
                     detail="audio-transcribe-unconfigured",
                     reply_bytes=len(hint.encode("utf-8")),
                     chatdb_rowid=msg.rowid,
@@ -811,8 +820,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             # transcripts succeeded — claude can mention it to the user
             # ("I couldn't hear your voice note, but here's what I see").
             parts.append(
-                "(Note: one or more voice notes could not be "
-                "transcribed and were skipped.)"
+                "(Note: one or more voice notes could not be " "transcribed and were skipped.)"
             )
         if readable_paths:
             path_list = "\n".join(f"  - {p}" for p in readable_paths)
@@ -913,7 +921,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
                 )
                 _record_self_send(norm, cancel_reply)
                 state.audit(
-                    handle_redacted=redacted, direction="out", kind="reply",
+                    handle_redacted=redacted,
+                    direction="out",
+                    kind="reply",
                     detail="intent-cancelled",
                     chatdb_rowid=msg.rowid,
                     cost_cents=0,
@@ -934,18 +944,23 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             if intent.destructive:
                 # Stash pending; reply with paraphrase; return.
                 state.set_pending_intent(
-                    norm, intent.command, intent.extra_arg or "",
+                    norm,
+                    intent.command,
+                    intent.extra_arg or "",
                 )
                 _metrics["intent_pending_confirmation"] += 1
                 try:
                     imessage_sender.send(
                         imessage_sender.SendRequest(
-                            handle=norm, body=intent.paraphrase,
+                            handle=norm,
+                            body=intent.paraphrase,
                         ),
                     )
                     _record_self_send(norm, intent.paraphrase)
                     state.audit(
-                        handle_redacted=redacted, direction="out", kind="reply",
+                        handle_redacted=redacted,
+                        direction="out",
+                        kind="reply",
                         detail=f"intent-confirm-req:{intent.command}",
                         chatdb_rowid=msg.rowid,
                         cost_cents=0,
@@ -979,7 +994,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         except Exception as e:
             logger.exception("command dispatch crashed: %s", e)
             state.audit(
-                handle_redacted=redacted, direction="out", kind="drop",
+                handle_redacted=redacted,
+                direction="out",
+                kind="drop",
                 detail=f"cmd-error:{type(e).__name__}",
                 chatdb_rowid=msg.rowid,
             )
@@ -997,7 +1014,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             _record_self_send(norm, cmd_result.reply)
             _metrics["cmd_replies"] += 1
             state.audit(
-                handle_redacted=redacted, direction="out", kind="reply",
+                handle_redacted=redacted,
+                direction="out",
+                kind="reply",
                 detail=f"cmd={body_for_dispatch.split()[0]}",
                 reply_bytes=len(cmd_result.reply.encode("utf-8")),
                 chatdb_rowid=msg.rowid,
@@ -1007,7 +1026,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             _metrics["send_errors"] += 1
             logger.error("cmd send failed: %s", e)
             state.audit(
-                handle_redacted=redacted, direction="out", kind="drop",
+                handle_redacted=redacted,
+                direction="out",
+                kind="drop",
                 detail=f"cmd-send-error:{type(e).__name__}",
                 chatdb_rowid=msg.rowid,
             )
@@ -1019,9 +1040,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             global _running
             _running = False
             try:
-                (state.DEFAULT_STATE_DIR / "STOP").write_text(
-                    "halted via iMessage /halt command\n"
-                )
+                (state.DEFAULT_STATE_DIR / "STOP").write_text("halted via iMessage /halt command\n")
             except OSError as e:
                 logger.warning("could not create STOP file: %s", e)
             logger.warning("HALT requested via /halt — daemon will exit")
@@ -1035,10 +1054,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         _metrics["paused_drops"] += 1
         logger.info("PAUSE active; dropping non-command message from %s", redacted)
         pause_reason = _read_pause_reason(state.DEFAULT_STATE_DIR)
-        notice = (
-            "⏸ Bridge paused — your message wasn't sent to Claude. "
-            "Send /resume to restart."
-        )
+        notice = "⏸ Bridge paused — your message wasn't sent to Claude. " "Send /resume to restart."
         if pause_reason:
             notice += f" (reason: {pause_reason})"
         try:
@@ -1049,8 +1065,11 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         except imessage_sender.SendError:
             pass
         state.audit(
-            handle_redacted=redacted, direction="out", kind="drop",
-            detail="paused", chatdb_rowid=msg.rowid,
+            handle_redacted=redacted,
+            direction="out",
+            kind="drop",
+            detail="paused",
+            chatdb_rowid=msg.rowid,
         )
         return
 
@@ -1109,10 +1128,12 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     # disk.
     if resume_id is not None:
         from . import session_discovery
+
         if session_discovery.find_by_id(resume_id) is None:
             logger.info(
                 "session %s gone from disk; clearing per-handle pointer for %s",
-                resume_id[:8], redacted,
+                resume_id[:8],
+                redacted,
             )
             state.set_current_session(norm, None)
             resume_id = None
@@ -1167,12 +1188,15 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         # error_category="resume_missing". We clear the per-handle
         # pointer and retry the SAME message fresh, so the user sees
         # one reply (the fresh one), not two.
-        if (not result.success
-                and result.error_category == "resume_missing"
-                and resume_id is not None):
+        if (
+            not result.success
+            and result.error_category == "resume_missing"
+            and resume_id is not None
+        ):
             logger.info(
                 "auto-recover: resume %s failed, retrying fresh for %s",
-                resume_id[:8], redacted,
+                resume_id[:8],
+                redacted,
             )
             state.set_current_session(norm, None)
             _metrics["stale_session_recovered"] += 1
@@ -1191,8 +1215,12 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     except claude_runner.RunnerConfigError as e:
         logger.error("runner config error: %s", e)
         result = claude_runner.ClaudeResult(
-            success=False, reply="", session_id=None, cost_usd=0.0,
-            duration_ms=0, error="runner config error",
+            success=False,
+            reply="",
+            session_id=None,
+            cost_usd=0.0,
+            duration_ms=0,
+            error="runner config error",
             error_category="exec_error",
         )
 
@@ -1210,7 +1238,8 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     if cents > per_call_cap_cents:
         logger.error(
             "per-call cost cap exceeded: %d cents > %d cents",
-            cents, per_call_cap_cents,
+            cents,
+            per_call_cap_cents,
         )
         _metrics["per_call_cap_hits"] += 1
         state.audit(
@@ -1245,10 +1274,12 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
     #
     # Only fires in coding/full trust modes. chat_only has no tools to
     # be blocked, so denials would be empty anyway.
-    if (result.success
-            and result.permission_denials
-            and active_preset.name in ("coding", "full")
-            and result.session_id):
+    if (
+        result.success
+        and result.permission_denials
+        and active_preset.name in ("coding", "full")
+        and result.session_id
+    ):
         # Persist the session id first so the retry can resume it.
         state.set_current_session(norm, result.session_id)
         # Summarize the denials for the user. Each entry from claude is
@@ -1289,7 +1320,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         # sentinel; the daemon detects it on the next inbound and runs
         # the retry path rather than dispatching as a slash command.
         state.set_pending_intent(
-            norm, command="__permission_relay__", extra_arg=result.session_id,
+            norm,
+            command="__permission_relay__",
+            extra_arg=result.session_id,
         )
         try:
             imessage_sender.send(
@@ -1298,7 +1331,9 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             _record_self_send(norm, paraphrase)
             _metrics["permission_relay_prompted"] += 1
             state.audit(
-                handle_redacted=redacted, direction="out", kind="reply",
+                handle_redacted=redacted,
+                direction="out",
+                kind="reply",
                 detail=f"permission-relay-prompt count={len(result.permission_denials)}",
                 reply_bytes=len(paraphrase.encode("utf-8")),
                 chatdb_rowid=msg.rowid,
@@ -1342,17 +1377,16 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         # query needs; the full error + failure count go to logger only.
         logger.warning(
             "claude failure handle=%s category=%s consec=%d dur=%dms raw=%r",
-            redacted, result.error_category, failures,
-            result.duration_ms, result.error,
+            redacted,
+            result.error_category,
+            failures,
+            result.duration_ms,
+            result.error,
         )
-        detail = (
-            f"err category={result.error_category} "
-            f"dur={result.duration_ms}ms"
-        )
+        detail = f"err category={result.error_category} " f"dur={result.duration_ms}ms"
         if failures >= cfg.circuit_breaker_failures:
             logger.error(
-                "circuit breaker tripped after %d consecutive failures — "
-                "creating PAUSE file",
+                "circuit breaker tripped after %d consecutive failures — " "creating PAUSE file",
                 failures,
             )
             state.trip_pause(
@@ -1395,6 +1429,7 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
 # ---------------------------------------------------------------------------
 # Kill-switch & heartbeat
 # ---------------------------------------------------------------------------
+
 
 def _is_paused(state_dir: Path) -> bool:
     return (state_dir / "PAUSE").exists()
@@ -1450,19 +1485,25 @@ def _heartbeat(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="imessage-bridge")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--once", action="store_true",
-                        help="poll one tick and exit (useful for testing)")
-    parser.add_argument("--reset-cursor", action="store_true",
-                        help="re-seed cursor at MAX(rowid); skips backlog. "
-                             "Use this AFTER restoring an old state.db.")
     parser.add_argument(
-        "--skip-selftest", action="store_true",
+        "--once", action="store_true", help="poll one tick and exit (useful for testing)"
+    )
+    parser.add_argument(
+        "--reset-cursor",
+        action="store_true",
+        help="re-seed cursor at MAX(rowid); skips backlog. "
+        "Use this AFTER restoring an old state.db.",
+    )
+    parser.add_argument(
+        "--skip-selftest",
+        action="store_true",
         help="DEV ONLY: skip the Bash-deny security selftest. Refused unless "
-             "stdin is a tty (so it cannot land in a launchd plist or "
-             "systemd unit by accident).",
+        "stdin is a tty (so it cannot land in a launchd plist or "
+        "systemd unit by accident).",
     )
     args = parser.parse_args(argv)
 
@@ -1511,10 +1552,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 6
-        logger.warning(
-            "⚠️ SELFTEST SKIPPED — DEV MODE — "
-            "DO NOT USE IN PRODUCTION"
-        )
+        logger.warning("⚠️ SELFTEST SKIPPED — DEV MODE — " "DO NOT USE IN PRODUCTION")
     else:
         # Trust-mode-agnostic selftests run in EVERY mode. They verify the
         # defenses that survive into coding/full modes (allowlist gate +
@@ -1557,8 +1595,9 @@ def main(argv: list[str] | None = None) -> int:
     global _memory_backend
     if cfg.trust_default == "chat_only" or cfg.memory_backend == "none":
         _memory_backend = memory_mod.NoneBackend()
-        logger.info("memory backend: none (trust=%s, configured=%s)",
-                    cfg.trust_default, cfg.memory_backend)
+        logger.info(
+            "memory backend: none (trust=%s, configured=%s)", cfg.trust_default, cfg.memory_backend
+        )
     else:
         _memory_backend = memory_mod.build_backend(
             backend_name=cfg.memory_backend,
@@ -1579,8 +1618,7 @@ def main(argv: list[str] | None = None) -> int:
     cursor = state.get_cursor(CURSOR_NAME, default=-1)
     if cursor < 0 or args.reset_cursor:
         seed = imessage_reader.latest_rowid()
-        logger.info("seeding cursor at MAX(rowid)=%d (reset=%s)",
-                    seed, args.reset_cursor)
+        logger.info("seeding cursor at MAX(rowid)=%d (reset=%s)", seed, args.reset_cursor)
         state.set_cursor(CURSOR_NAME, seed, allow_regression=True)
         cursor = seed
 
@@ -1611,8 +1649,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 state.set_cursor(CURSOR_NAME, msg.rowid)
             except state.CursorRegression as e:
-                logger.error("cursor regression refused for rowid=%d: %s",
-                             msg.rowid, e)
+                logger.error("cursor regression refused for rowid=%d: %s", msg.rowid, e)
                 continue
             try:
                 _enqueue_message(msg, cfg)
@@ -1667,7 +1704,9 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("force-flush on stop failed: %s", e)
 
     _heartbeat(
-        state_dir=state_dir, cursor=cursor, cfg=cfg,
+        state_dir=state_dir,
+        cursor=cursor,
+        cfg=cfg,
         paused=_is_paused(state_dir),
         stop_requested=True,
     )

@@ -28,13 +28,34 @@ _SCAN_RECORDS = 80
 _DEEP_SEARCH_BYTES = 64 * 1024
 _DEEP_SEARCH_CANDIDATES = 200
 
-_STOPWORDS = frozenset({
-    "a", "an", "the", "session", "sessions", "claude",
-    "for", "with", "about", "from", "in", "of", "on", "my",
-    "to", "and", "or",
-    # recency hints — implied by default recency-first sort
-    "latest", "recent", "newest", "last", "yesterday", "today",
-})
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "session",
+        "sessions",
+        "claude",
+        "for",
+        "with",
+        "about",
+        "from",
+        "in",
+        "of",
+        "on",
+        "my",
+        "to",
+        "and",
+        "or",
+        # recency hints — implied by default recency-first sort
+        "latest",
+        "recent",
+        "newest",
+        "last",
+        "yesterday",
+        "today",
+    }
+)
 
 _ROUTINE_PREFIX = "<scheduled-task"
 
@@ -47,7 +68,7 @@ _ROUTINE_PREFIX = "<scheduled-task"
 # security plumbing not a real conversation). Excluded by default.
 _BRIDGE_INTERNAL_CWD_MARKERS: Final = (
     "cimb-selftest-",  # startup security selftest
-    "cimb-call-",      # hermetic per-call sandbox for normal replies
+    "cimb-call-",  # hermetic per-call sandbox for normal replies
 )
 
 # Snippet-text signature of the selftest prompt. Belt-and-suspenders for
@@ -199,9 +220,9 @@ def discover_sessions(
     # Scan-budget heuristic: with two default-on filters (routines +
     # bridge-internal) the candidate pool can be much larger than the
     # final limit, so widen the scan accordingly.
-    expand = (4 if within_cwd else 1)
-    expand *= (3 if not include_routines else 1)
-    expand *= (2 if not include_bridge_internal else 1)
+    expand = 4 if within_cwd else 1
+    expand *= 3 if not include_routines else 1
+    expand *= 2 if not include_bridge_internal else 1
     scan_budget = max(limit * expand, 40)
 
     results: List[SessionInfo] = []
@@ -213,7 +234,9 @@ def discover_sessions(
         cwd, snippet = _extract_session_metadata(path)
         is_routine = snippet.startswith(_ROUTINE_PREFIX)
         is_internal = _is_bridge_internal(
-            cwd, file_path=path, snippet=snippet,
+            cwd,
+            file_path=path,
+            snippet=snippet,
         )
         if not include_routines and is_routine:
             continue
@@ -226,16 +249,18 @@ def discover_sessions(
                 cwd.resolve().relative_to(within_cwd.resolve())
             except (ValueError, OSError):
                 continue
-        results.append(SessionInfo(
-            session_id=path.stem,
-            cwd=cwd,
-            last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
-            snippet=snippet,
-            file_path=path,
-            size_bytes=stat.st_size,
-            is_routine=is_routine,
-            is_bridge_internal=is_internal,
-        ))
+        results.append(
+            SessionInfo(
+                session_id=path.stem,
+                cwd=cwd,
+                last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+                snippet=snippet,
+                file_path=path,
+                size_bytes=stat.st_size,
+                is_routine=is_routine,
+                is_bridge_internal=is_internal,
+            )
+        )
         if len(results) >= limit:
             break
     return results
@@ -341,7 +366,9 @@ def find_by_id(
                 size_bytes=stat.st_size,
                 is_routine=snippet.startswith(_ROUTINE_PREFIX),
                 is_bridge_internal=_is_bridge_internal(
-                    cwd, file_path=candidate, snippet=snippet,
+                    cwd,
+                    file_path=candidate,
+                    snippet=snippet,
                 ),
             )
     return None

@@ -101,8 +101,7 @@ def _insert_message(
             h_rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         else:
             h_rowid = h[0]
-            conn.execute("UPDATE handle SET service = ? WHERE ROWID = ?",
-                         (service, h_rowid))
+            conn.execute("UPDATE handle SET service = ? WHERE ROWID = ?", (service, h_rowid))
         # ensure chat exists
         c = conn.execute("SELECT ROWID FROM chat WHERE guid = ?", (chat_guid,)).fetchone()
         if c is None:
@@ -118,9 +117,19 @@ def _insert_message(
             "is_from_me, associated_message_guid, is_emote, item_type, "
             "balloon_bundle_id, cache_has_attachments) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rowid, h_rowid, date_ns, text, attributed, is_from_me,
-             associated_message_guid, is_emote, item_type, balloon_bundle_id,
-             cache_has_attachments),
+            (
+                rowid,
+                h_rowid,
+                date_ns,
+                text,
+                attributed,
+                is_from_me,
+                associated_message_guid,
+                is_emote,
+                item_type,
+                balloon_bundle_id,
+                cache_has_attachments,
+            ),
         )
         conn.execute(
             "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
@@ -132,7 +141,11 @@ def _insert_message(
 
 
 def _insert_attachment(
-    db: Path, *, message_rowid: int, filename: str, mime_type: str = "image/jpeg",
+    db: Path,
+    *,
+    message_rowid: int,
+    filename: str,
+    mime_type: str = "image/jpeg",
 ) -> int:
     """Insert an attachment row and join it to ``message_rowid``. Returns
     the new attachment ROWID."""
@@ -144,8 +157,7 @@ def _insert_attachment(
         )
         attach_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
-            "INSERT INTO message_attachment_join "
-            "(message_id, attachment_id) VALUES (?, ?)",
+            "INSERT INTO message_attachment_join " "(message_id, attachment_id) VALUES (?, ?)",
             (message_rowid, attach_id),
         )
         conn.commit()
@@ -155,6 +167,7 @@ def _insert_attachment(
 
 
 # --- SQL-layer filters -------------------------------------------------
+
 
 def test_reader_returns_imessage_inbound(tmp_path: Path):
     db = _make_chatdb(tmp_path)
@@ -185,7 +198,10 @@ def test_reader_filters_outbound(tmp_path: Path):
 def test_reader_filters_tapbacks(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="reaction",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="reaction",
         associated_message_guid="some-guid",
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
@@ -195,7 +211,10 @@ def test_reader_filters_tapbacks(tmp_path: Path):
 def test_reader_filters_balloon_apps(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="pay",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="pay",
         balloon_bundle_id="com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.PassbookUIService.PeerPaymentMessagesExtension",
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
@@ -210,7 +229,10 @@ def test_reader_phantom_attachment_yields_as_empty_skip(tmp_path: Path):
     hours after any real activity. Sam reported this 2026-05-19."""
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="￼",  # OBJECT REPLACEMENT only
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="￼",  # OBJECT REPLACEMENT only
         cache_has_attachments=1,
     )
     # No attachment row inserted — path resolution returns ()
@@ -222,7 +244,8 @@ def test_reader_phantom_attachment_yields_as_empty_skip(tmp_path: Path):
 
 
 def test_reader_image_only_with_resolved_path_surfaces_normally(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """The legit case: attachment row exists, file is on disk and inside
     the attachment root, body is image-only (just U+FFFC). Surface with
@@ -234,7 +257,10 @@ def test_reader_image_only_with_resolved_path_surfaces_normally(
     img_path.write_bytes(b"\xff\xd8\xff\xe0fakejpg")
     monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="￼",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="￼",
         cache_has_attachments=1,
     )
     _insert_attachment(db, message_rowid=1, filename=str(img_path))
@@ -251,7 +277,9 @@ def test_reader_image_with_caption_strips_object_replacement(tmp_path: Path):
     """Image + caption: the caption text survives, U+FFFC is stripped."""
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
+        db,
+        rowid=1,
+        handle="+15551234567",
         text="￼look at this screenshot",  # OBJECT REPL + caption
         cache_has_attachments=1,
     )
@@ -271,7 +299,10 @@ def test_reader_no_attachment_flag_for_text_only(tmp_path: Path):
 def test_reader_filters_participant_events(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="X added Y",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="X added Y",
         item_type=3,  # participant-add
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
@@ -287,6 +318,7 @@ def test_reader_respects_last_rowid(tmp_path: Path):
 
 
 # --- Body extraction / truncation --------------------------------------
+
 
 def test_reader_strips_bidi_chars_from_inbound_body(tmp_path: Path):
     """Regression: 2026-05-24 security review. A sender embedding BiDi
@@ -308,7 +340,9 @@ def test_reader_strips_c0_controls_from_inbound_body(tmp_path: Path):
     """Same defense covers C0 control chars (except tab/newline/CR)."""
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
+        db,
+        rowid=1,
+        handle="+15551234567",
         text="hello\x07world\nstill here\ttabbed",
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
@@ -351,8 +385,11 @@ def test_reader_falls_back_to_attributed_body(tmp_path: Path):
     }
     blob = plistlib.dumps(archive, fmt=plistlib.FMT_BINARY)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
-        text=None, attributed=blob,
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text=None,
+        attributed=blob,
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     assert len(msgs) == 1
@@ -363,8 +400,11 @@ def test_reader_refuses_oversized_attributed_body(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     too_big = b"\x00" * (imessage_reader.MAX_ATTRIBUTED_BODY_BYTES + 16)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
-        text=None, attributed=too_big,
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text=None,
+        attributed=too_big,
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     # No usable body — row yielded with skip sentinel so cursor advances.
@@ -388,8 +428,11 @@ def test_reader_refuses_rich_classes_in_attributed_body(tmp_path: Path):
     }
     blob = plistlib.dumps(archive, fmt=plistlib.FMT_BINARY)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
-        text=None, attributed=blob,
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text=None,
+        attributed=blob,
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     # Parser refused; row yielded as empty-skip so cursor advances.
@@ -401,8 +444,11 @@ def test_reader_refuses_rich_classes_in_attributed_body(tmp_path: Path):
 def test_reader_malformed_attributed_body_does_not_crash(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
-        text="visible text", attributed=b"\x00not a plist",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="visible text",
+        attributed=b"\x00not a plist",
     )
     # The text column is preferred; malformed attributedBody is silently ignored.
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
@@ -418,8 +464,11 @@ def test_reader_unparseable_attributed_body_empty_text_yields_skip(tmp_path: Pat
     """
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
-        text=None, attributed=b"\x00not a plist",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text=None,
+        attributed=b"\x00not a plist",
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     assert len(msgs) == 1
@@ -430,11 +479,16 @@ def test_reader_unparseable_attributed_body_empty_text_yields_skip(tmp_path: Pat
 
 # --- Group chat flag ---------------------------------------------------
 
+
 def test_reader_flags_group_chats(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
-        chat_guid="g-1", chat_style=43, text="hi all",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        chat_guid="g-1",
+        chat_style=43,
+        text="hi all",
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     assert len(msgs) == 1
@@ -444,14 +498,19 @@ def test_reader_flags_group_chats(tmp_path: Path):
 def test_reader_one_to_one_not_group(tmp_path: Path):
     db = _make_chatdb(tmp_path)
     _insert_message(
-        db, rowid=1, handle="+15551234567",
-        chat_guid="d-1", chat_style=45, text="hi",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        chat_guid="d-1",
+        chat_style=45,
+        text="hi",
     )
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
     assert msgs[0].is_group is False
 
 
 # --- Apple date conversion ---------------------------------------------
+
 
 def test_apple_date_to_iso_nanoseconds():
     # 2024-01-15 00:00:00 UTC = Unix 1705276800 → Apple ns = (1705276800 - 978307200) * 1e9
@@ -468,6 +527,7 @@ def test_apple_date_to_iso_seconds_path():
 
 
 # --- latest_rowid ------------------------------------------------------
+
 
 def test_latest_rowid_returns_max(tmp_path: Path):
     db = _make_chatdb(tmp_path)
@@ -487,6 +547,7 @@ def test_latest_rowid_missing_db(tmp_path: Path):
 
 # --- Attachment path resolution ----------------------------------------
 
+
 def test_attachment_path_surfaced_when_file_exists(tmp_path: Path, monkeypatch):
     """Image rows should surface the on-disk file path so the daemon can
     hand it to claude (so claude can Read it). Apple stores attachments
@@ -502,7 +563,10 @@ def test_attachment_path_surfaced_when_file_exists(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
 
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="￼",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="￼",
         cache_has_attachments=1,
     )
     _insert_attachment(db, message_rowid=1, filename=str(img_path))
@@ -527,7 +591,10 @@ def test_attachment_path_outside_root_rejected(tmp_path: Path, monkeypatch):
     bad.write_bytes(b"x")
 
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="￼",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="￼",
         cache_has_attachments=1,
     )
     _insert_attachment(db, message_rowid=1, filename=str(bad))
@@ -547,11 +614,16 @@ def test_attachment_path_missing_file_dropped(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
 
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="￼",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="￼",
         cache_has_attachments=1,
     )
     _insert_attachment(
-        db, message_rowid=1, filename=str(fake_root / "ghost.jpeg"),
+        db,
+        message_rowid=1,
+        filename=str(fake_root / "ghost.jpeg"),
     )
 
     msgs = list(imessage_reader.fetch_new_messages(0, chatdb=db))
@@ -567,7 +639,10 @@ def test_attachment_path_count_capped(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(imessage_reader, "_ATTACHMENT_ROOT", fake_root)
 
     _insert_message(
-        db, rowid=1, handle="+15551234567", text="￼",
+        db,
+        rowid=1,
+        handle="+15551234567",
+        text="￼",
         cache_has_attachments=1,
     )
     # Insert more than the cap

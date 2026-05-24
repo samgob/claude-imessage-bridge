@@ -14,6 +14,7 @@ from src import trust, claude_runner
 
 # --- Named presets exist with the expected shape ------------------------
 
+
 def test_chat_only_preset_shape():
     p = trust.PRESET_CHAT_ONLY
     assert p.name == "chat_only"
@@ -59,9 +60,7 @@ def test_full_preset_shape():
     assert p.disallowed_tools == frozenset({"AskUserQuestion"})
     # Bash, Read, Write, Skill, MCPs, etc. all allowed.
     for tool in ["Bash", "Read", "Write", "Skill", "Agent", "WebFetch"]:
-        assert tool not in p.disallowed_tools, (
-            f"{tool} must be available in full trust mode"
-        )
+        assert tool not in p.disallowed_tools, f"{tool} must be available in full trust mode"
     assert p.max_turns == 20
     assert p.memory_backend == "claude_md"
 
@@ -80,24 +79,31 @@ def test_coding_and_full_carry_resume_scope_prompt():
     present-tense in the new turn ("I see the screenshot — already
     logged" — referencing yesterday's screenshot as if just shared)."""
     from src import claude_runner
+
     for p in (trust.PRESET_CODING, trust.PRESET_FULL):
-        assert p.extra_system_prompt == claude_runner.BRIDGE_RESUME_SCOPE_PROMPT, (
-            f"{p.name} preset must carry the resume-scope clarifier"
-        )
+        assert (
+            p.extra_system_prompt == claude_runner.BRIDGE_RESUME_SCOPE_PROMPT
+        ), f"{p.name} preset must carry the resume-scope clarifier"
         # The clarifier must mention the time-scope to actually do its job.
         assert "current" in p.extra_system_prompt.lower()
-        assert "past" in p.extra_system_prompt.lower() \
-            or "historical" in p.extra_system_prompt.lower() \
+        assert (
+            "past" in p.extra_system_prompt.lower()
+            or "historical" in p.extra_system_prompt.lower()
             or "earlier" in p.extra_system_prompt.lower()
+        )
 
 
 # --- get_preset -----------------------------------------------------------
 
-@pytest.mark.parametrize("name,expected", [
-    ("chat_only", trust.PRESET_CHAT_ONLY),
-    ("coding", trust.PRESET_CODING),
-    ("full", trust.PRESET_FULL),
-])
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("chat_only", trust.PRESET_CHAT_ONLY),
+        ("coding", trust.PRESET_CODING),
+        ("full", trust.PRESET_FULL),
+    ],
+)
 def test_get_preset_known_names(name, expected):
     assert trust.get_preset(name) is expected
 
@@ -119,6 +125,7 @@ def test_get_preset_case_sensitive():
 
 
 # --- resolve_trust --------------------------------------------------------
+
 
 def test_resolve_trust_default_no_alias():
     p = trust.resolve_trust(
@@ -180,6 +187,7 @@ def test_resolve_trust_unknown_default_name_raises():
 
 
 # --- Cross-cutting argv denylist -----------------------------------------
+
 
 def test_forbidden_argv_flags_exposed():
     """``FORBIDDEN_ARGV_FLAGS`` mirrors ``claude_runner.ARGV_DENYLIST`` so

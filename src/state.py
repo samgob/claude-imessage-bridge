@@ -110,19 +110,14 @@ def _ensure_audit_log_v1_columns(conn: sqlite3.Connection) -> None:
     Idempotent: only ALTERs columns that don't already exist (covers the
     partial-migration crash path).
     """
-    existing = {
-        row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")
-    }
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
     if "chatdb_rowid" not in existing:
         conn.execute("ALTER TABLE audit_log ADD COLUMN chatdb_rowid INTEGER")
     if "cost_cents" not in existing:
         conn.execute("ALTER TABLE audit_log ADD COLUMN cost_cents INTEGER")
     if "error_category" not in existing:
         conn.execute("ALTER TABLE audit_log ADD COLUMN error_category TEXT")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS "
-        "idx_audit_chatdb_rowid ON audit_log(chatdb_rowid)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS " "idx_audit_chatdb_rowid ON audit_log(chatdb_rowid)")
 
 
 def _ensure_conversations_v2_columns(conn: sqlite3.Connection) -> None:
@@ -138,17 +133,11 @@ def _ensure_conversations_v2_columns(conn: sqlite3.Connection) -> None:
 
     Idempotent: only ALTERs columns that don't already exist.
     """
-    existing = {
-        row["name"] for row in conn.execute("PRAGMA table_info(conversations)")
-    }
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
     if "last_options_json" not in existing:
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN last_options_json TEXT"
-        )
+        conn.execute("ALTER TABLE conversations ADD COLUMN last_options_json TEXT")
     if "last_options_at" not in existing:
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN last_options_at TEXT"
-        )
+        conn.execute("ALTER TABLE conversations ADD COLUMN last_options_at TEXT")
 
 
 def _ensure_conversations_v3_columns(conn: sqlite3.Connection) -> None:
@@ -163,17 +152,11 @@ def _ensure_conversations_v3_columns(conn: sqlite3.Connection) -> None:
 
     Idempotent — only ALTERs columns that don't already exist.
     """
-    existing = {
-        row["name"] for row in conn.execute("PRAGMA table_info(conversations)")
-    }
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
     if "pending_intent_json" not in existing:
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN pending_intent_json TEXT"
-        )
+        conn.execute("ALTER TABLE conversations ADD COLUMN pending_intent_json TEXT")
     if "pending_intent_at" not in existing:
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN pending_intent_at TEXT"
-        )
+        conn.execute("ALTER TABLE conversations ADD COLUMN pending_intent_at TEXT")
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
@@ -321,9 +304,7 @@ def set_cursor(
     """
     new_value = int(value)
     with connection(state_dir) as conn:
-        row = conn.execute(
-            "SELECT value FROM cursor WHERE name = ?", (name,)
-        ).fetchone()
+        row = conn.execute("SELECT value FROM cursor WHERE name = ?", (name,)).fetchone()
         if row is not None:
             current = int(row["value"])
             if new_value < current:
@@ -370,9 +351,7 @@ def set_current_session(
         )
 
 
-def set_last_options(
-    handle: str, options: list, *, state_dir: Path = DEFAULT_STATE_DIR
-) -> None:
+def set_last_options(handle: str, options: list, *, state_dir: Path = DEFAULT_STATE_DIR) -> None:
     """Stash the numbered options shown to the user (for /pick N).
 
     Each option is a dict: ``{"id": session_id, "snippet": str}``. The
@@ -406,9 +385,7 @@ LAST_OPTIONS_TTL_SECONDS = 30 * 60  # 30 min — stale picks aren't honored
 PENDING_INTENT_TTL_SECONDS = 60 * 15
 
 
-def get_last_options(
-    handle: str, *, state_dir: Path = DEFAULT_STATE_DIR
-) -> list:
+def get_last_options(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> list:
     """Return the numbered options shown to ``handle``, or [] if stale/absent.
 
     Options older than LAST_OPTIONS_TTL_SECONDS are treated as missing —
@@ -417,8 +394,7 @@ def get_last_options(
     """
     with connection(state_dir) as conn:
         row = conn.execute(
-            "SELECT last_options_json, last_options_at "
-            "FROM conversations WHERE handle = ?",
+            "SELECT last_options_json, last_options_at " "FROM conversations WHERE handle = ?",
             (handle,),
         ).fetchone()
         if not row or not row["last_options_json"] or not row["last_options_at"]:
@@ -468,9 +444,7 @@ def set_pending_intent(
         )
 
 
-def get_pending_intent(
-    handle: str, *, state_dir: Path = DEFAULT_STATE_DIR
-) -> Optional[dict]:
+def get_pending_intent(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> Optional[dict]:
     """Return ``{"command": str, "extra_arg": str}`` or None.
 
     None means no pending confirmation OR the pending one has aged out
@@ -480,8 +454,7 @@ def get_pending_intent(
     """
     with connection(state_dir) as conn:
         row = conn.execute(
-            "SELECT pending_intent_json, pending_intent_at "
-            "FROM conversations WHERE handle = ?",
+            "SELECT pending_intent_json, pending_intent_at " "FROM conversations WHERE handle = ?",
             (handle,),
         ).fetchone()
         if not row or not row["pending_intent_json"] or not row["pending_intent_at"]:
@@ -501,9 +474,7 @@ def get_pending_intent(
         return payload
 
 
-def clear_pending_intent(
-    handle: str, *, state_dir: Path = DEFAULT_STATE_DIR
-) -> None:
+def clear_pending_intent(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> None:
     """NULL out the pending intent for ``handle`` (post-execution or cancel)."""
     now = datetime.now(timezone.utc).isoformat()
     with connection(state_dir) as conn:
@@ -548,15 +519,20 @@ def audit(
             "detail, reply_bytes, chatdb_rowid, cost_cents, error_category) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                ts, handle_redacted, direction, kind,
-                detail, reply_bytes, chatdb_rowid, cost_cents, error_category,
+                ts,
+                handle_redacted,
+                direction,
+                kind,
+                detail,
+                reply_bytes,
+                chatdb_rowid,
+                cost_cents,
+                error_category,
             ),
         )
 
 
-def tail_audit_rows(
-    n: int = 10, *, state_dir: Path = DEFAULT_STATE_DIR
-) -> list[dict]:
+def tail_audit_rows(n: int = 10, *, state_dir: Path = DEFAULT_STATE_DIR) -> list[dict]:
     """Return the last ``n`` audit rows, newest first.
 
     Each row is a dict mirroring the audit_log columns. ``handle_redacted``
@@ -578,6 +554,7 @@ def tail_audit_rows(
 
 
 # --- Rate limiting --------------------------------------------------------
+
 
 def _bucket(ts: Optional[float] = None) -> str:
     """Minute-bucket key. Same minute -> same key."""
@@ -624,8 +601,7 @@ def reserve_reply_slot(
         if new_count > limit:
             # Roll back the increment so other callers see accurate state.
             conn.execute(
-                "UPDATE reply_counter SET n = n - 1 "
-                "WHERE bucket = ? AND handle = ?",
+                "UPDATE reply_counter SET n = n - 1 " "WHERE bucket = ? AND handle = ?",
                 (bucket, handle),
             )
             return (False, new_count - 1)
@@ -645,6 +621,7 @@ def prune_reply_counter(*, keep_buckets: int = 10, state_dir: Path = DEFAULT_STA
 
 # --- Daily cost tracking ---------------------------------------------------
 
+
 def _today_utc_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -653,9 +630,7 @@ def today_cost_cents(*, state_dir: Path = DEFAULT_STATE_DIR) -> int:
     """Cents spent today (UTC). Returns 0 if no entry."""
     today = _today_utc_date()
     with connection(state_dir) as conn:
-        row = conn.execute(
-            "SELECT cents FROM daily_cost WHERE date_utc = ?", (today,)
-        ).fetchone()
+        row = conn.execute("SELECT cents FROM daily_cost WHERE date_utc = ?", (today,)).fetchone()
         return int(row["cents"]) if row else 0
 
 
@@ -672,9 +647,7 @@ def add_cost_cents(amount_cents: int, *, state_dir: Path = DEFAULT_STATE_DIR) ->
             "ON CONFLICT(date_utc) DO UPDATE SET cents = cents + excluded.cents",
             (today, int(amount_cents)),
         )
-        row = conn.execute(
-            "SELECT cents FROM daily_cost WHERE date_utc = ?", (today,)
-        ).fetchone()
+        row = conn.execute("SELECT cents FROM daily_cost WHERE date_utc = ?", (today,)).fetchone()
         return int(row["cents"])
 
 
@@ -686,12 +659,11 @@ def cost_over_cap(cap_usd: float, *, state_dir: Path = DEFAULT_STATE_DIR) -> boo
 
 # --- Circuit breaker for consecutive Claude failures -----------------------
 
+
 def get_consecutive_failures(*, state_dir: Path = DEFAULT_STATE_DIR) -> int:
     """Current run of back-to-back Claude failures. Reset by success."""
     with connection(state_dir) as conn:
-        row = conn.execute(
-            "SELECT value FROM cursor WHERE name = 'consec_failures'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM cursor WHERE name = 'consec_failures'").fetchone()
         return int(row["value"]) if row else 0
 
 
@@ -702,9 +674,7 @@ def record_claude_failure(*, state_dir: Path = DEFAULT_STATE_DIR) -> int:
             "INSERT INTO cursor (name, value) VALUES ('consec_failures', 1) "
             "ON CONFLICT(name) DO UPDATE SET value = value + 1"
         )
-        row = conn.execute(
-            "SELECT value FROM cursor WHERE name = 'consec_failures'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM cursor WHERE name = 'consec_failures'").fetchone()
         return int(row["value"])
 
 

@@ -85,11 +85,11 @@ def _parse_backup_date(name: str) -> _dt.date | None:
     if not _is_backup_filename(name):
         return None
     # state-YYYYMMDD.db[.gz] → strip prefix + suffix, parse middle
-    body = name[len("state-"):]
+    body = name[len("state-") :]
     if body.endswith(".db.gz"):
-        body = body[:-len(".db.gz")]
+        body = body[: -len(".db.gz")]
     elif body.endswith(".db"):
-        body = body[:-len(".db")]
+        body = body[: -len(".db")]
     try:
         return _dt.datetime.strptime(body, "%Y%m%d").date()
     except ValueError:
@@ -214,7 +214,9 @@ def run_if_due(state_dir: Path) -> bool:
     compressed, deleted = _prune_and_compress(backup_dir, today)
     if compressed or deleted:
         logger.info(
-            "backup rotation: compressed=%d deleted=%d", compressed, deleted,
+            "backup rotation: compressed=%d deleted=%d",
+            compressed,
+            deleted,
         )
 
     _last_backup_date = today
