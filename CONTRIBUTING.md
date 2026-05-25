@@ -177,29 +177,40 @@ escalation vector. Trust mode resolves once at daemon start.
 
 4. **Submit a PR with at least:**
    - Code change
-   - Tests (the project has 440+; new features should add their own)
+   - Tests (the project has ~530; new features should add their own)
+   - CHANGELOG.md entry under `[Unreleased]`
    - THREAT_MODEL.md entry if you touched a defense
-   - `ruff check`, `mypy`, `bandit`, `pytest` all green locally
+   - All gates green locally (see Development setup below)
 
 ## Development setup
 
 ```bash
 git clone https://github.com/samgob/claude-imessage-bridge.git
 cd claude-imessage-bridge
-python3.11 -m pip install -e .
-python3.11 -m pip install pytest pytest-cov ruff mypy bandit
+python3.11 -m pip install -e ".[dev]"
 
 # Run the tests:
 pytest tests/
 
-# Run the gates:
+# Run every gate the CI runs (same versions, same flags):
 ruff check src/ tests/
+ruff format --check src/ tests/        # CI fails if formatting drifts
 mypy --ignore-missing-imports src/
 bandit -q -r src/ -c pyproject.toml
 ```
 
-The full CI matrix (Python 3.11/3.12/3.13 + ruff + mypy + bandit +
-pip-audit + detect-secrets) runs in GitHub Actions on every push.
+The `[dev]` extras pin tool versions to **exactly** what CI runs, so
+local gate output matches CI. If a gate passes locally but fails in CI,
+the most likely cause is that you installed an unpinned tool by
+accident — re-install with `pip install -e ".[dev]" --force-reinstall`.
+
+If you've changed any code under `src/` or `tests/`, run
+`ruff format src/ tests/` before committing — `ruff format --check`
+is one of the gates and will fail CI otherwise.
+
+The full CI matrix (Python 3.11/3.12/3.13 + ruff check + ruff format
++ mypy + bandit + pip-audit + detect-secrets) runs in GitHub Actions
+on every push.
 
 ## Areas where contributions are welcome
 

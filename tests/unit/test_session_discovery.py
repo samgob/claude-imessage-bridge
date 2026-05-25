@@ -62,7 +62,8 @@ def test_is_bridge_internal_none():
 def test_is_bridge_internal_user_cwd():
     """A normal user project cwd must NOT be flagged."""
     assert (
-        session_discovery._is_bridge_internal(Path("/Users/sam/Desktop/Claude Homebase")) is False
+        session_discovery._is_bridge_internal(Path("/Users/testuser/Desktop/Claude Homebase"))
+        is False
     )
 
 
@@ -80,9 +81,9 @@ def test_discover_excludes_bridge_internal_by_default(tmp_path: Path):
     for i in range(3):
         _make_session_file(
             root,
-            f"-Users-sam-proj{i}",
+            f"-Users-testuser-proj{i}",
             f"user-sid-{i:08d}",
-            cwd=f"/Users/sam/proj{i}",
+            cwd=f"/Users/testuser/proj{i}",
             user_text=f"working on project {i}",
             mtime=base_mtime - i * 60,
         )
@@ -122,9 +123,9 @@ def test_discover_include_bridge_internal_opt_in(tmp_path: Path):
     root.mkdir()
     _make_session_file(
         root,
-        "-Users-sam-proj",
+        "-Users-testuser-proj",
         "user-sid-12345678",
-        cwd="/Users/sam/proj",
+        cwd="/Users/testuser/proj",
         user_text="real work",
     )
     _make_session_file(
@@ -156,9 +157,9 @@ def test_search_excludes_bridge_internal_by_default(tmp_path: Path):
     root.mkdir()
     _make_session_file(
         root,
-        "-Users-sam-bash-script",
+        "-Users-testuser-bash-script",
         "user-bash-sid-00001",
-        cwd="/Users/sam/bash-script",
+        cwd="/Users/testuser/bash-script",
         user_text="writing a bash script for the cluster",
     )
     _make_session_file(

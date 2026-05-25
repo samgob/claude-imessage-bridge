@@ -287,12 +287,12 @@ def test_load_aliases_string_form(tmp_path: Path, fake_claude_binary: Path):
     project.mkdir()
     data = _good_yaml(project, fake_claude_binary)
     data["session_aliases"] = {
-        "wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+        "myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f",
     }
     _write(cfg_path, data)
     cfg = config_mod.load(cfg_path)
     assert cfg.session_aliases == {
-        "wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+        "myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f",
     }
 
 
@@ -318,12 +318,12 @@ def test_load_aliases_case_folds_keys(tmp_path: Path, fake_claude_binary: Path):
     project.mkdir()
     data = _good_yaml(project, fake_claude_binary)
     data["session_aliases"] = {
-        "WESCO": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+        "MYPROJECT": "4fe39c70-21d7-467e-801b-ca3167ac130f",
     }
     _write(cfg_path, data)
     cfg = config_mod.load(cfg_path)
-    assert "wesco" in cfg.session_aliases
-    assert "WESCO" not in cfg.session_aliases
+    assert "myproject" in cfg.session_aliases
+    assert "MYPROJECT" not in cfg.session_aliases
 
 
 def test_load_refuses_bad_alias_key(tmp_path: Path, fake_claude_binary: Path):
@@ -357,7 +357,7 @@ def test_load_refuses_bad_alias_uuid(tmp_path: Path, fake_claude_binary: Path):
     project = tmp_path / "proj"
     project.mkdir()
     data = _good_yaml(project, fake_claude_binary)
-    data["session_aliases"] = {"wesco": "not-a-real-uuid!"}
+    data["session_aliases"] = {"myproject": "not-a-real-uuid!"}
     _write(cfg_path, data)
     with pytest.raises(ValueError, match="session_aliases"):
         config_mod.load(cfg_path)
@@ -369,7 +369,7 @@ def test_load_refuses_mapping_without_id(tmp_path: Path, fake_claude_binary: Pat
     project.mkdir()
     data = _good_yaml(project, fake_claude_binary)
     data["session_aliases"] = {
-        "wesco": {"profile": "default"},  # missing id
+        "myproject": {"profile": "default"},  # missing id
     }
     _write(cfg_path, data)
     with pytest.raises(ValueError, match="id"):
@@ -381,7 +381,7 @@ def test_load_refuses_non_mapping_aliases_top_level(tmp_path: Path, fake_claude_
     project = tmp_path / "proj"
     project.mkdir()
     data = _good_yaml(project, fake_claude_binary)
-    data["session_aliases"] = ["wesco", "arden"]  # list, not mapping
+    data["session_aliases"] = ["myproject", "arden"]  # list, not mapping
     _write(cfg_path, data)
     with pytest.raises(ValueError, match="session_aliases"):
         config_mod.load(cfg_path)
@@ -409,8 +409,8 @@ circuit_breaker_failures: 5
 claude_binary: {cb}
 debug: false
 session_aliases:
-  wesco: "4fe39c70-21d7-467e-801b-ca3167ac130f"
-  WESCO: "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001"
+  myproject: "4fe39c70-21d7-467e-801b-ca3167ac130f"
+  MYPROJECT: "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001"
 """.format(pd=str(project), cb=str(fake_claude_binary))
     cfg_path.write_text(raw)
     with pytest.raises(ValueError, match="duplicate"):
@@ -469,11 +469,11 @@ def test_trust_per_alias_override(tmp_path: Path, fake_claude_binary: Path):
     project = tmp_path / "proj"
     project.mkdir()
     data = _good_yaml(project, fake_claude_binary)
-    data["session_aliases"] = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
-    data["trust"] = {"default": "full", "per_alias": {"wesco": "chat_only"}}
+    data["session_aliases"] = {"myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    data["trust"] = {"default": "full", "per_alias": {"myproject": "chat_only"}}
     _write(cfg_path, data)
     cfg = config_mod.load(cfg_path)
-    assert cfg.trust_per_alias == {"wesco": "chat_only"}
+    assert cfg.trust_per_alias == {"myproject": "chat_only"}
 
 
 def test_trust_invalid_default_refused(tmp_path: Path, fake_claude_binary: Path):
@@ -503,8 +503,8 @@ def test_trust_per_alias_invalid_preset_refused(tmp_path: Path, fake_claude_bina
     project = tmp_path / "proj"
     project.mkdir()
     data = _good_yaml(project, fake_claude_binary)
-    data["session_aliases"] = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
-    data["trust"] = {"per_alias": {"wesco": "garbage"}}
+    data["session_aliases"] = {"myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    data["trust"] = {"per_alias": {"myproject": "garbage"}}
     _write(cfg_path, data)
     with pytest.raises(ValueError, match="not one of"):
         config_mod.load(cfg_path)
@@ -530,7 +530,7 @@ def test_memory_claude_md_loads(tmp_path: Path, fake_claude_binary: Path):
     data["memory"] = {
         "backend": "claude_md",
         "claude_md": {
-            "root": "/Users/sam/.claude/CLAUDE.md",
+            "root": "/Users/testuser/.claude/CLAUDE.md",
             "follow_references": True,
             "max_bytes": 32768,
             "exclude": [".*\\.env.*"],
@@ -539,7 +539,7 @@ def test_memory_claude_md_loads(tmp_path: Path, fake_claude_binary: Path):
     _write(cfg_path, data)
     cfg = config_mod.load(cfg_path)
     assert cfg.memory_backend == "claude_md"
-    assert cfg.memory_claude_md["root"] == "/Users/sam/.claude/CLAUDE.md"
+    assert cfg.memory_claude_md["root"] == "/Users/testuser/.claude/CLAUDE.md"
     assert cfg.memory_claude_md["max_bytes"] == 32768
     assert cfg.memory_claude_md["exclude"] == [".*\\.env.*"]
 

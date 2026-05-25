@@ -45,7 +45,7 @@ class IntentMatch:
     ignored otherwise.
     ``extra_arg`` is an optional argument captured from the body (e.g.
     for a future ``/use <alias>`` intent that wants to extract the alias
-    name from "switch to wesco").
+    name from "switch to myproject").
     """
 
     command: str
@@ -122,7 +122,7 @@ _INTENTS: List[dict] = [
         "paraphrase": "",
         "patterns": [
             # Bare "status" or "status?" — alone on a line, not embedded
-            # in "wesco status" or "samsung status."
+            # in something like "myproject status" or "deploy status."
             r"^\s*status\??\s*$",
             # Explicit "bridge/daemon/claude status"
             r"\b(bridge|daemon|claude) status\b",

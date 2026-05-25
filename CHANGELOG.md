@@ -111,7 +111,7 @@ flipping the repo public:
 
 ## [Phase D] — Test suite + CI + threat-model resync
 
-- 200+ unit tests (now 513), audit_log schema migrations, status.json
+- 200+ unit tests at Phase D close, audit_log schema migrations, status.json
   health sidecar, operator docs (audit-log cookbook, recovery,
   launchd, tool opt-in), CI workflow (pytest/ruff/mypy/bandit/pip-audit/
   detect-secrets) with SHA-pinned actions.

@@ -188,13 +188,13 @@ def _parse_session_aliases(raw: dict) -> Dict[str, str]:
     """Parse the optional ``session_aliases`` block.
 
     Accepted value shapes per entry:
-      - Plain string: ``wesco: 4fe39c70-21d7-...``
-      - Mapping with ``id`` key: ``wesco: {id: 4fe39c70-..., profile: foo}``
+      - Plain string: ``myproject: 4fe39c70-21d7-...``
+      - Mapping with ``id`` key: ``myproject: {id: 4fe39c70-..., profile: foo}``
         (the mapping form is forward-compatible with later additions
         like ``profile``; we currently only read ``id``).
 
     Returns a flat ``{name: uuid}`` dict. Names are case-folded to lower
-    so ``/use Wesco`` and ``/use wesco`` resolve identically.
+    so ``/use MyProject`` and ``/use myproject`` resolve identically.
 
     Raises ``ValueError`` on:
       - non-dict top-level value

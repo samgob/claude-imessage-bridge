@@ -115,21 +115,21 @@ def test_readonly_intents_have_empty_paraphrase():
         "/status",  # already a command — pass through
         "/help",
         "hello there",  # generic chat
-        "tell me about wesco",  # legit query, no command-shaped intent
+        "tell me about myproject",  # legit query, no command-shaped intent
         "the killer feature is...",  # "killer" should NOT match /halt
         "I love bridges",  # "bridge" alone shouldn't fire /halt
         "what time is it",  # not a recognized intent
         "can you help me with...",  # "help me" isn't "help"
         # Regression: "X status" must NOT trigger /status. This was a real
-        # live-test bug — "What's Wesco status?" got routed to /status.
-        "What's Wesco status?",
-        "what's the status of the samsung deal",
-        "wesco status",
+        # live-test bug — "What's MyProject status?" got routed to /status.
+        "What's MyProject status?",
+        "what's the status of the widgetco deal",
+        "myproject status",
         "status of the q4 forecast",
         "status report on Brian",
         # Regression: "what happened" must NOT trigger /tail-audit.
-        "what happened with wesco yesterday",
-        "what happened on the LexisNexis call",
+        "what happened with myproject yesterday",
+        "what happened on the GlobalInc call",
     ],
 )
 def test_classify_intent_no_false_positives(body):
@@ -142,7 +142,7 @@ def test_classify_intent_no_false_positives(body):
 def test_slash_commands_pass_through():
     """Anything starting with / returns None — the /command dispatcher
     handles those, and we don't want intent classification interfering."""
-    for body in ["/status", "/halt", "/use wesco", "/whatever"]:
+    for body in ["/status", "/halt", "/use myproject", "/whatever"]:
         assert intents.classify_intent(body) is None
 
 

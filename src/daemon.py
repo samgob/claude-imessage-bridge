@@ -108,6 +108,10 @@ def _normalize_for_dedupe(body: str) -> str:
     """Canonicalize a body for echo-dedupe hashing.
 
     Why each transform:
+    - Strip BiDi format chars, zero-width chars, and C0/C1 controls
+      (must match what imessage_reader does on INBOUND bodies — without
+      this, an outbound reply containing a zero-width char would not
+      match its inbound echo and the self-chat dedupe would miss).
     - Translate smart quotes / em-dashes / NBSP to ASCII equivalents
       (iMessage autocorrect rewrites these between send and sync-back).
     - Collapse all whitespace runs to single spaces (iMessage occasionally
@@ -116,7 +120,14 @@ def _normalize_for_dedupe(body: str) -> str:
       sentence starts on some devices).
     - Strip.
     """
-    s = body.translate(_QUOTE_NORMALIZE)
+    # MUST match what imessage_reader.fetch_new_messages does to the
+    # inbound body before it's compared against the recent-outbound
+    # ring. The reader stripped display-attack chars as of the 2026-05-24
+    # hardening pass; outbound canonicalization had to follow suit or
+    # the dedupe would systematically miss any reply containing a
+    # zero-width / BiDi char.
+    s = imessage_sender.strip_display_attacks(body)
+    s = s.translate(_QUOTE_NORMALIZE)
     # Collapse hyphen runs (iMessage autocorrects "--" → "—" which the
     # table above already maps to "-"; outbound "--" needs the same
     # canonical form so both sides hash identically).

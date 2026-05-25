@@ -67,7 +67,10 @@ conversation (self-chat or per allowed contact), replies via AppleScript.
 ## State store
 
 `~/.claude-imessage-bridge/state.db` (SQLite, mode 0o600 in 0o700 dir).
-Schema is versioned via `PRAGMA user_version`; current: **v1**.
+Schema is versioned via `PRAGMA user_version`; current: **v3** (see
+`SCHEMA_VERSION` in `src/state.py` for the authoritative constant).
+Forward migrations run automatically on daemon startup; rows written
+under v1 / v2 have NULLs in any later-added column.
 
 | Table | Purpose |
 |---|---|

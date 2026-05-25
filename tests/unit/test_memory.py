@@ -20,25 +20,27 @@ from src import memory as memory_mod
 def _make_memory_tree(root_dir: Path) -> Path:
     """Build a fake CLAUDE.md + memory/ tree under ``root_dir``.
 
-    Returns the CLAUDE.md path. The memory tree is structured like
-    Sam's: memory/projects/, memory/people/, memory/context/, each
-    with a few sample .md files.
+    Returns the CLAUDE.md path. The memory tree mirrors the layout a
+    real operator would have: memory/projects/, memory/people/,
+    memory/context/, each with a few sample .md files.
     """
     claude_md = root_dir / "CLAUDE.md"
-    claude_md.write_text("# Sam\n\n" "EVP at Upstage. Active deals: Wesco, Samsung, LexisNexis.\n")
+    claude_md.write_text(
+        "# User\n\nPM at ExampleCo. Active deals: AcmeCorp, WidgetCo, GlobalInc.\n"
+    )
     memory = root_dir / "memory"
     memory.mkdir()
     (memory / "projects").mkdir()
     (memory / "people").mkdir()
     (memory / "context").mkdir()
-    (memory / "projects" / "wesco.md").write_text(
-        "# Wesco POC\n\nUC1 94.3%, UC2 96.7%. Nidhi review call pending.\n"
+    (memory / "projects" / "acmecorp.md").write_text(
+        "# AcmeCorp POC\n\nUC1 94.3%, UC2 96.7%. Bob review call pending.\n"
     )
-    (memory / "projects" / "samsung.md").write_text(
-        "# Samsung Install 3\n\nDocker/firewall issues; kickoff May 6.\n"
+    (memory / "projects" / "widgetco.md").write_text(
+        "# WidgetCo Install 3\n\nDocker/firewall issues; kickoff May 6.\n"
     )
-    (memory / "people" / "brian.md").write_text("# Brian Lawing\n\nUpstage Sales/BD lead.\n")
-    (memory / "context" / "conferences.md").write_text("# Conferences\n\nINTNY, MCEIF coming up.\n")
+    (memory / "people" / "alice.md").write_text("# Alice Example\n\nExampleCo BD lead.\n")
+    (memory / "context" / "conferences.md").write_text("# Conferences\n\nConfA, ConfB coming up.\n")
     return claude_md
 
 
@@ -47,7 +49,7 @@ def _make_memory_tree(root_dir: Path) -> Path:
 
 def test_none_backend_returns_empty():
     backend = memory_mod.NoneBackend()
-    r = backend.context_for("what's wesco status")
+    r = backend.context_for("what's acmecorp status")
     assert r.text == ""
     assert r.sources == []
 
@@ -56,23 +58,23 @@ def test_none_backend_returns_empty():
 
 
 def test_tokenize_drops_stopwords_and_short():
-    tokens = memory_mod._tokenize("What is the status of Wesco today?")
+    tokens = memory_mod._tokenize("What is the status of AcmeCorp today?")
     # 'what', 'is', 'the', 'of', 'today' are stopwords (or <3 chars after split)
-    assert "wesco" in tokens
+    assert "acmecorp" in tokens
     assert "status" in tokens
     assert "what" not in tokens
     assert "the" not in tokens
 
 
 def test_tokenize_lowercases():
-    tokens = memory_mod._tokenize("WESCO Status")
-    assert "wesco" in tokens
-    assert "WESCO" not in tokens
+    tokens = memory_mod._tokenize("ACMECORP Status")
+    assert "acmecorp" in tokens
+    assert "ACMECORP" not in tokens
 
 
 def test_tokenize_dedupes():
-    tokens = memory_mod._tokenize("wesco wesco status wesco")
-    assert tokens.count("wesco") == 1
+    tokens = memory_mod._tokenize("acmecorp acmecorp status acmecorp")
+    assert tokens.count("acmecorp") == 1
 
 
 # --- ClaudeMdBackend basic shape ----------------------------------------
@@ -83,7 +85,7 @@ def test_claude_md_loads_eager_core(tmp_path: Path):
     backend = memory_mod.ClaudeMdBackend(root=claude_md, max_bytes=32 * 1024)
     r = backend.context_for("hello")
     # Eager core always loads even on no-token-match queries.
-    assert "EVP at Upstage" in r.text
+    assert "PM at ExampleCo" in r.text
     assert len(r.sources) >= 1
     assert r.sources[0][0] == str(claude_md)
 
@@ -91,12 +93,12 @@ def test_claude_md_loads_eager_core(tmp_path: Path):
 def test_claude_md_loads_matched_reference(tmp_path: Path):
     claude_md = _make_memory_tree(tmp_path)
     backend = memory_mod.ClaudeMdBackend(root=claude_md, max_bytes=32 * 1024)
-    r = backend.context_for("what's wesco status today")
-    # CLAUDE.md + wesco.md should both be in the loaded sources.
+    r = backend.context_for("what's acmecorp status today")
+    # CLAUDE.md + acmecorp.md should both be in the loaded sources.
     src_paths = [s[0] for s in r.sources]
     assert any("CLAUDE.md" in p for p in src_paths)
-    assert any("wesco.md" in p for p in src_paths)
-    # And the body should contain wesco-specific content.
+    assert any("acmecorp.md" in p for p in src_paths)
+    # And the body should contain acmecorp-specific content.
     assert "UC1 94.3%" in r.text
 
 
@@ -108,18 +110,18 @@ def test_claude_md_no_match_no_reference_loaded(tmp_path: Path):
     src_paths = [s[0] for s in r.sources]
     assert any("CLAUDE.md" in p for p in src_paths)
     # No reference files matched.
-    assert not any("wesco" in p or "samsung" in p for p in src_paths)
+    assert not any("acmecorp" in p or "widgetco" in p for p in src_paths)
 
 
 def test_claude_md_excluded_paths_skipped(tmp_path: Path):
     claude_md = _make_memory_tree(tmp_path)
     # Add a secret file under memory/projects/ that the exclude pattern
     # should keep out of context.
-    (tmp_path / "memory" / "projects" / "wesco_secrets.md").write_text(
-        "secret credentials for wesco\n"
+    (tmp_path / "memory" / "projects" / "acmecorp_secrets.md").write_text(
+        "secret credentials for acmecorp\n"
     )
     backend = memory_mod.ClaudeMdBackend(root=claude_md, max_bytes=32 * 1024, exclude=[r"secrets"])
-    r = backend.context_for("wesco")
+    r = backend.context_for("acmecorp")
     src_paths = [s[0] for s in r.sources]
     assert not any("secrets" in p for p in src_paths)
 
@@ -149,8 +151,8 @@ def test_claude_md_caches_results(tmp_path: Path):
     """Second call with same query returns the same MemoryLoadResult."""
     claude_md = _make_memory_tree(tmp_path)
     backend = memory_mod.ClaudeMdBackend(root=claude_md, max_bytes=32 * 1024)
-    r1 = backend.context_for("wesco status")
-    r2 = backend.context_for("wesco status")
+    r1 = backend.context_for("acmecorp status")
+    r2 = backend.context_for("acmecorp status")
     assert r1 is r2  # cache hit returns the SAME object
 
 
@@ -160,10 +162,10 @@ def test_claude_md_follow_references_disabled(tmp_path: Path):
     backend = memory_mod.ClaudeMdBackend(
         root=claude_md, follow_references=False, max_bytes=32 * 1024
     )
-    r = backend.context_for("wesco")
+    r = backend.context_for("acmecorp")
     src_paths = [s[0] for s in r.sources]
     assert any("CLAUDE.md" in p for p in src_paths)
-    assert not any("wesco.md" in p for p in src_paths)
+    assert not any("acmecorp.md" in p for p in src_paths)
 
 
 # --- CustomScriptBackend -------------------------------------------------
@@ -233,8 +235,8 @@ def test_build_backend_claude_md(tmp_path: Path):
         custom_params={},
     )
     assert isinstance(b, memory_mod.ClaudeMdBackend)
-    r = b.context_for("wesco")
-    assert "wesco" in r.text.lower()
+    r = b.context_for("acmecorp")
+    assert "acmecorp" in r.text.lower()
 
 
 def test_build_backend_unknown_falls_back_to_none():

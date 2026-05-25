@@ -256,6 +256,41 @@ def test_dedupe_em_dash_normalized():
     assert daemon._is_recent_self_send(handle, "running tests – back soon")
 
 
+def test_dedupe_handles_bidi_zero_width_chars():
+    """Regression: 2026-05-24 round-2 security review.
+
+    The 2026-05-24 hardening pass made the reader strip BiDi /
+    zero-width / C0 chars from inbound bodies. The outbound side
+    (_body_digest) did NOT yet strip those, so:
+
+      outbound "okay​" → digest_A
+      iCloud echo arrives → reader strips → "okay" → digest_B
+
+    digest_A != digest_B → dedupe miss → loop. The fix is to call
+    strip_display_attacks inside _normalize_for_dedupe so both sides
+    hash the same canonical form.
+    """
+    daemon._recent_self_sends.clear()
+    handle = "+15551234567"
+    # ZERO-WIDTH SPACE in the OUTBOUND body
+    daemon._record_self_send(handle, "okay​going now")
+    # INBOUND echo after the reader stripped — same logical content
+    assert daemon._is_recent_self_send(handle, "okay going now") or daemon._is_recent_self_send(
+        handle, "okaygoing now"
+    ), "echo dedupe must survive the reader's display-attack strip — " "see _normalize_for_dedupe"
+
+
+def test_dedupe_digest_strips_bidi_before_hashing():
+    """Direct check that _body_digest is invariant under the same
+    display-attack strip the reader applies. If this ever fails, the
+    outbound/inbound digest asymmetry is back."""
+    plain = daemon._body_digest("hi there")
+    with_zwsp = daemon._body_digest("hi​ there")
+    with_rlo = daemon._body_digest("hi‮ there")
+    with_bell = daemon._body_digest("hi\x07 there")
+    assert plain == with_zwsp == with_rlo == with_bell
+
+
 # --- Outbound-rate auto-PAUSE safety net --------------------------------
 
 
@@ -592,7 +627,7 @@ def test_image_with_resolved_path_calls_claude_with_augmented_prompt(monkeypatch
     # so accept_edits flows through. Stub trust to return PRESET_FULL.
     monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
 
-    path = "/Users/samgobrail/Library/Messages/Attachments/ab/12/foo.jpeg"
+    path = "/Users/testuser/Library/Messages/Attachments/ab/12/foo.jpeg"
     msg = _msg(
         "+15551234567",
         body="what is this?",
@@ -620,7 +655,7 @@ def test_image_only_no_caption_calls_claude(monkeypatch):
     monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
     monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
 
-    path = "/Users/samgobrail/Library/Messages/Attachments/cd/34/bar.png"
+    path = "/Users/testuser/Library/Messages/Attachments/cd/34/bar.png"
     msg = _msg(
         "+15551234567",
         body="",

@@ -225,11 +225,11 @@ def test_pending_intent_with_extra_arg(state_dir: Path):
     state.set_pending_intent(
         "+15551234567",
         "/use",
-        "wesco",
+        "myproject",
         state_dir=state_dir,
     )
     pending = state.get_pending_intent("+15551234567", state_dir=state_dir)
-    assert pending == {"command": "/use", "extra_arg": "wesco"}
+    assert pending == {"command": "/use", "extra_arg": "myproject"}
 
 
 def test_pending_intent_ttl_expires(state_dir: Path):

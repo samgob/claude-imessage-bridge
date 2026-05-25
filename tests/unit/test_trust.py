@@ -140,7 +140,7 @@ def test_resolve_trust_default_alias_with_no_override():
     p = trust.resolve_trust(
         trust_default="full",
         trust_per_alias={},
-        active_alias="wesco",
+        active_alias="myproject",
     )
     assert p is trust.PRESET_FULL
 

@@ -285,19 +285,19 @@ def test_unknown_command_returns_help_hint(state_dir: Path):
 
 def test_use_alias_hit_resumes_directly(state_dir: Path, monkeypatch):
     """Configured alias matches: skip keyword search, resume the named sid."""
-    aliases = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    aliases = {"myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
     info = session_discovery.SessionInfo(
         session_id="4fe39c70-21d7-467e-801b-ca3167ac130f",
         cwd=None,
         last_modified=datetime.now(timezone.utc),
-        snippet="Wesco POC notes",
+        snippet="MyProject POC notes",
         file_path=Path("/fake/4fe39c70.jsonl"),
         size_bytes=200,
     )
     monkeypatch.setattr(
         session_discovery,
         "find_by_id",
-        lambda sid: info if sid == aliases["wesco"] else None,
+        lambda sid: info if sid == aliases["myproject"] else None,
     )
 
     # search_sessions must NOT be called on the happy alias path.
@@ -307,21 +307,21 @@ def test_use_alias_hit_resumes_directly(state_dir: Path, monkeypatch):
     monkeypatch.setattr(session_discovery, "search_sessions", fail_search)
 
     r = commands.parse_and_dispatch(
-        "/use wesco",
+        "/use myproject",
         handle=HANDLE,
         state_dir=state_dir,
         aliases=aliases,
     )
-    assert r.set_session_id == aliases["wesco"]
-    assert "alias 'wesco'" in r.reply
+    assert r.set_session_id == aliases["myproject"]
+    assert "alias 'myproject'" in r.reply
     assert "Resumed" in r.reply
 
 
 def test_use_alias_case_insensitive(state_dir: Path, monkeypatch):
-    """/use Wesco and /use WESCO must resolve the same as /use wesco."""
-    aliases = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    """/use MyProject and /use MYPROJECT must resolve the same as /use myproject."""
+    aliases = {"myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
     info = session_discovery.SessionInfo(
-        session_id=aliases["wesco"],
+        session_id=aliases["myproject"],
         cwd=None,
         last_modified=datetime.now(timezone.utc),
         snippet="x",
@@ -329,14 +329,14 @@ def test_use_alias_case_insensitive(state_dir: Path, monkeypatch):
         size_bytes=10,
     )
     monkeypatch.setattr(session_discovery, "find_by_id", lambda sid: info)
-    for q in ("/use Wesco", "/use WESCO", "/use wesco", "/use  wesco  "):
+    for q in ("/use MyProject", "/use MYPROJECT", "/use myproject", "/use  myproject  "):
         r = commands.parse_and_dispatch(
             q,
             handle=HANDLE,
             state_dir=state_dir,
             aliases=aliases,
         )
-        assert r.set_session_id == aliases["wesco"], f"query {q!r} failed to match alias"
+        assert r.set_session_id == aliases["myproject"], f"query {q!r} failed to match alias"
 
 
 def test_use_alias_miss_falls_through(state_dir: Path, monkeypatch):
@@ -362,7 +362,7 @@ def test_use_alias_miss_falls_through(state_dir: Path, monkeypatch):
 
 def test_use_no_alias_match_falls_through(state_dir: Path, monkeypatch):
     """Query doesn't match any alias → regular keyword search runs."""
-    aliases = {"wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
+    aliases = {"myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f"}
     captured = {}
 
     def fake_search(q, limit, exclude_session_ids):
@@ -399,21 +399,21 @@ def test_aliases_empty_message(state_dir: Path):
 
 def test_aliases_lists_with_age_and_snippet(state_dir: Path, monkeypatch):
     aliases = {
-        "wesco": "4fe39c70-21d7-467e-801b-ca3167ac130f",
+        "myproject": "4fe39c70-21d7-467e-801b-ca3167ac130f",
         "arden": "8a1b2c3d-aaaa-bbbb-cccc-deadbeef0001",
     }
-    wesco_info = session_discovery.SessionInfo(
-        session_id=aliases["wesco"],
+    myproject_info = session_discovery.SessionInfo(
+        session_id=aliases["myproject"],
         cwd=None,
         last_modified=datetime.now(timezone.utc),
-        snippet="POC deck for Wesco",
+        snippet="POC deck for MyProject",
         file_path=Path("/fake/w.jsonl"),
         size_bytes=10,
     )
     monkeypatch.setattr(
         session_discovery,
         "find_by_id",
-        lambda sid: wesco_info if sid == aliases["wesco"] else None,
+        lambda sid: myproject_info if sid == aliases["myproject"] else None,
     )
     r = commands.parse_and_dispatch(
         "/aliases",
@@ -421,10 +421,10 @@ def test_aliases_lists_with_age_and_snippet(state_dir: Path, monkeypatch):
         state_dir=state_dir,
         aliases=aliases,
     )
-    assert "wesco" in r.reply
+    assert "myproject" in r.reply
     assert "arden" in r.reply
     assert "missing on disk" in r.reply  # arden has no info
-    assert "POC deck for Wesco" in r.reply  # wesco has snippet
+    assert "POC deck for MyProject" in r.reply  # myproject has snippet
     assert "/use <name>" in r.reply  # footer
 
 
@@ -519,7 +519,7 @@ def test_help_mentions_pause_resume(state_dir: Path):
 def _fake_cfg(**overrides):
     base = {
         "daily_cost_cap_usd": 5.0,
-        "project_directory": Path("/Users/sam/Desktop/Claude Homebase"),
+        "project_directory": Path("/Users/testuser/Desktop/Claude Homebase"),
         "session_aliases": {},
     }
     base.update(overrides)
@@ -601,7 +601,7 @@ def test_whoami_with_active_session_no_alias(state_dir: Path, monkeypatch):
 
 def test_whoami_with_active_session_alias_match(state_dir: Path, monkeypatch):
     sid = "4fe39c70-21d7-467e-801b-ca3167ac130f"
-    aliases = {"wesco": sid}
+    aliases = {"myproject": sid}
     state.set_current_session(HANDLE, sid, state_dir=state_dir)
     monkeypatch.setattr(
         session_discovery,
@@ -615,7 +615,7 @@ def test_whoami_with_active_session_alias_match(state_dir: Path, monkeypatch):
         aliases=aliases,
         cfg=_fake_cfg(),
     )
-    assert "alias: wesco" in r.reply
+    assert "alias: myproject" in r.reply
 
 
 def test_whoami_session_gone_from_disk(state_dir: Path, monkeypatch):
@@ -783,13 +783,13 @@ def test_sources_lists_loaded_files(state_dir: Path, monkeypatch):
         daemon_mod,
         "_last_memory_sources",
         [
-            ("/Users/sam/.claude/CLAUDE.md", 5234),
-            ("/Users/sam/.claude/memory/projects/wesco.md", 2841),
+            ("/Users/testuser/.claude/CLAUDE.md", 5234),
+            ("/Users/testuser/.claude/memory/projects/myproject.md", 2841),
         ],
     )
     r = commands.parse_and_dispatch("/sources", handle=HANDLE, state_dir=state_dir)
     assert "CLAUDE.md" in r.reply
-    assert "wesco.md" in r.reply
+    assert "myproject.md" in r.reply
     assert "5,234 bytes" in r.reply
     assert "Total:" in r.reply
 

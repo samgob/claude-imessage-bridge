@@ -635,7 +635,7 @@ def test_run_claude_extracts_permission_denials(monkeypatch, fake_claude_binary)
                 "permission_denials": [
                     {
                         "tool_name": "Edit",
-                        "tool_input": {"file_path": "/Users/sam/.claude/CLAUDE.md"},
+                        "tool_input": {"file_path": "/Users/testuser/.claude/CLAUDE.md"},
                     },
                 ],
                 "is_error": False,

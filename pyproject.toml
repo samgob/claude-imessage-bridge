@@ -8,13 +8,25 @@ dependencies = [
     "pyyaml>=6.0,<7.0",
 ]
 
-# Dev dependencies — pinned to the versions CI runs so contributors get
-# the same gate behavior locally. Install with:
+# Dev dependencies — the union of every tool CI runs across its parallel
+# jobs (pytest, ruff, mypy, bandit, pip-audit, detect-secrets). Install
+# all of them locally with:
+#
 #   pip install -e ".[dev]"
+#
+# CI itself does NOT use this extra — each job installs only the tools
+# it needs for speed (see .github/workflows/ci.yml). The version
+# constraints below match what those individual jobs install, so a
+# contributor's local gates should reproduce CI's output. If you bump
+# a tool version here, bump the matching pin in ci.yml in the same
+# commit.
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0,<10.0",
-    "ruff>=0.5,<1.0",
+    # ruff is pinned EXACT — format output drifts between ruff minor
+    # versions, so any non-exact pin would let a contributor produce
+    # a `ruff format` that fails CI's pinned check.
+    "ruff==0.6.9",
     "mypy>=1.10,<2.0",
     "bandit>=1.7,<2.0",
     "pip-audit>=2.7,<3.0",
