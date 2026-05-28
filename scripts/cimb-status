@@ -74,9 +74,7 @@ def _format_status(payload: dict, age_seconds: float) -> str:
     lines.append(f"  consecutive errors:   {consec}")
     lines.append(f"  schema version:       {schema}")
     if metrics:
-        metric_parts = "  ".join(
-            f"{k}: {v}" for k, v in sorted(metrics.items())
-        )
+        metric_parts = "  ".join(f"{k}: {v}" for k, v in sorted(metrics.items()))
         lines.append("  metrics (since last heartbeat):")
         lines.append(f"    {metric_parts}")
     else:

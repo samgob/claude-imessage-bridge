@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""cimb-install-agent — install claude-imessage-bridge as a launchd user agent.
+
+The manual launchd setup in docs/LAUNCHD.md is ~10 steps. This script
+collapses everything that can be automated into one command. The two
+steps that genuinely cannot be automated (granting Full Disk Access
+and Automation > Messages to the Python binary in System Settings)
+are clearly printed at the end with exact paths to click.
+
+Usage:
+  cimb-install-agent                   install the agent (interactive)
+  cimb-install-agent --dry-run         print the plist, don't write
+  cimb-install-agent --uninstall       stop + remove the agent
+  cimb-install-agent --status          show whether the agent is running
+  cimb-install-agent --python PATH     override Python binary detection
+  cimb-install-agent --token TOKEN     OAuth token (or set
+                                       $CLAUDE_CODE_OAUTH_TOKEN, or prompt)
+
+Exit codes:
+  0  success
+  1  user-facing error (printed clearly)
+  2  bootstrap or validation failed
+
+Idempotent: re-running install after install will refuse rather than
+silently overwriting. Use --uninstall first if you want a clean
+reinstall.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# --- Locations (defaults; some are derived at runtime) -------------------
+
+# The launchd label. Matches docs/LAUNCHD.md so the doc and the script
+# install agree on a single name.
+AGENT_LABEL = "dev.samgob.claude-imessage-bridge"
+
+HOME = Path.home()
+PLIST_PATH = HOME / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
+STATE_DIR = HOME / ".claude-imessage-bridge"
+LOGS_DIR = STATE_DIR / "logs"
+STATUS_JSON = STATE_DIR / "status.json"
+
+# Common Python install locations on macOS. The script prefers Homebrew
+# (Apple Silicon, then Intel) over MacPorts, then the system Python.
+# Override with --python.
+PYTHON_CANDIDATES = (
+    "/opt/homebrew/bin/python3.11",  # Homebrew Apple Silicon
+    "/usr/local/bin/python3.11",  # Homebrew Intel
+    "/opt/local/bin/python3.11",  # MacPorts
+    "/opt/homebrew/bin/python3.12",
+    "/usr/local/bin/python3.12",
+    "/opt/local/bin/python3.12",
+    "/opt/homebrew/bin/python3.13",
+    "/usr/local/bin/python3.13",
+    "/opt/local/bin/python3.13",
+    "/usr/bin/python3",  # system Python (last resort)
+)
+
+
+# --- Pretty printing -----------------------------------------------------
+
+
+def info(msg: str) -> None:
+    print(f"  {msg}")
+
+
+def step(n: int, msg: str) -> None:
+    print(f"\n[{n}] {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"  ⚠ {msg}", file=sys.stderr)
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"\nERROR: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# --- Detection -----------------------------------------------------------
+
+
+def detect_repo_root() -> Path:
+    """The script lives at <repo>/scripts/cimb-install-agent. Walk up."""
+    candidate = Path(__file__).resolve().parent.parent
+    if not (candidate / "src" / "daemon.py").is_file():
+        fail(
+            f"can't find src/daemon.py from script location ({candidate}). "
+            "Run this script from inside the cloned repo's scripts/ dir."
+        )
+    return candidate
+
+
+def detect_python(override: str | None) -> Path:
+    if override:
+        p = Path(override).expanduser().resolve()
+        if not p.is_file():
+            fail(f"--python {override} doesn't exist")
+        return p
+    for candidate in PYTHON_CANDIDATES:
+        if Path(candidate).is_file():
+            return Path(candidate)
+    fail(
+        "no Python 3.11+ found in standard locations. Install with "
+        "`brew install python@3.11` or pass --python /path/to/python3"
+    )
+
+
+def verify_bridge_importable(python: Path, repo_root: Path) -> None:
+    """Run `python -c 'from src import daemon'` to confirm the package
+    is actually importable from the repo root. Catches the case where
+    `pip install -e .` was never run."""
+    try:
+        subprocess.run(
+            [str(python), "-c", "from src import daemon"],
+            cwd=str(repo_root),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    except subprocess.CalledProcessError as e:
+        fail(
+            f"can't import `src.daemon` with {python}. Did you run "
+            f"`pip install -e .` in {repo_root}?\n\n"
+            f"stderr: {e.stderr.decode('utf-8', errors='replace')}"
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        fail(f"failed to verify Python import: {e}")
+
+
+def detect_claude_cli() -> Path | None:
+    """Return path to `claude` CLI if found on PATH, else None."""
+    found = shutil.which("claude")
+    return Path(found) if found else None
+
+
+# --- Token handling ------------------------------------------------------
+
+
+def resolve_token(token_arg: str | None) -> str:
+    """Get the OAuth token. Priority: --token arg, env var, prompt."""
+    if token_arg:
+        return token_arg.strip()
+    env = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY")
+    if env:
+        info("using auth token from environment")
+        return env.strip()
+    print(
+        "\n  No --token passed and no CLAUDE_CODE_OAUTH_TOKEN /\n"
+        "  ANTHROPIC_API_KEY in env. The bridge needs one to call\n"
+        "  claude. Paste a token below (input hidden) or hit Ctrl-C\n"
+        "  to cancel and set it up another way.\n"
+    )
+    tok = getpass.getpass("  OAuth token: ").strip()
+    if not tok:
+        fail("empty token — aborting")
+    return tok
+
+
+# --- Plist construction --------------------------------------------------
+
+
+def build_plist(*, python: Path, repo_root: Path, token: str, token_key: str) -> bytes:
+    """Build the plist as bytes (plistlib produces XML). ``token_key``
+    is either ``CLAUDE_CODE_OAUTH_TOKEN`` or ``ANTHROPIC_API_KEY``."""
+    payload = {
+        "Label": AGENT_LABEL,
+        "ProgramArguments": [str(python), "-m", "src.daemon"],
+        "WorkingDirectory": str(repo_root),
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 30,
+        "StandardOutPath": str(LOGS_DIR / "stdout.log"),
+        "StandardErrorPath": str(LOGS_DIR / "stderr.log"),
+        "EnvironmentVariables": {
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            token_key: token,
+        },
+    }
+    return plistlib.dumps(payload)
+
+
+# --- launchctl wrappers --------------------------------------------------
+
+
+def launchctl_uid() -> str:
+    return str(os.getuid())
+
+
+def domain_target() -> str:
+    return f"gui/{launchctl_uid()}"
+
+
+def service_target() -> str:
+    return f"{domain_target()}/{AGENT_LABEL}"
+
+
+def is_loaded() -> bool:
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", service_target()],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except OSError:
+        return False
+
+
+def bootstrap() -> None:
+    info(f"loading: launchctl bootstrap {domain_target()} {PLIST_PATH}")
+    result = subprocess.run(
+        ["launchctl", "bootstrap", domain_target(), str(PLIST_PATH)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(
+            "launchctl bootstrap failed:\n"
+            f"  stdout: {result.stdout.decode().strip()}\n"
+            f"  stderr: {result.stderr.decode().strip()}",
+            code=2,
+        )
+
+
+def bootout() -> None:
+    info(f"unloading: launchctl bootout {service_target()}")
+    result = subprocess.run(
+        ["launchctl", "bootout", service_target()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    # bootout returns nonzero if not loaded — that's fine for uninstall idempotency
+    if result.returncode != 0 and b"Could not find specified service" not in result.stderr:
+        warn(f"bootout exited {result.returncode}: {result.stderr.decode().strip()}")
+
+
+def validate_plist() -> None:
+    result = subprocess.run(
+        ["plutil", "-lint", str(PLIST_PATH)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(
+            f"plutil -lint reports the plist is malformed:\n"
+            f"  {result.stdout.decode().strip()}\n"
+            f"  {result.stderr.decode().strip()}",
+            code=2,
+        )
+
+
+# --- status verification -------------------------------------------------
+
+
+def wait_for_status(timeout_seconds: int = 15) -> dict | None:
+    """Poll status.json for up to ``timeout_seconds``. Returns parsed JSON
+    or None if it never appeared."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if STATUS_JSON.is_file():
+            try:
+                return json.loads(STATUS_JSON.read_text())
+            except json.JSONDecodeError:
+                pass  # mid-write race; try again
+        time.sleep(0.5)
+    return None
+
+
+# --- The four commands ---------------------------------------------------
+
+
+def cmd_install(args: argparse.Namespace) -> None:
+    repo_root = detect_repo_root()
+    print(f"\nInstalling launchd agent: {AGENT_LABEL}")
+    info(f"repo root: {repo_root}")
+
+    if PLIST_PATH.exists():
+        fail(
+            f"{PLIST_PATH} already exists. Run with --uninstall first if "
+            "you want a clean reinstall, or edit the plist by hand."
+        )
+
+    step(1, "Detecting Python install")
+    python = detect_python(args.python)
+    info(f"using Python: {python}")
+
+    step(2, "Verifying the bridge package imports")
+    verify_bridge_importable(python, repo_root)
+    info("import OK")
+
+    step(3, "Looking for Claude Code CLI on PATH")
+    claude_bin = detect_claude_cli()
+    if claude_bin is None:
+        warn(
+            "`claude` CLI not found on PATH. The daemon will fail at "
+            "startup until Claude Code is installed. Continuing anyway."
+        )
+    else:
+        info(f"found: {claude_bin}")
+
+    step(4, "Resolving auth token")
+    token = resolve_token(args.token)
+    token_key = (
+        "ANTHROPIC_API_KEY"
+        if token.startswith("sk-ant-") or args.token_kind == "api"
+        else "CLAUDE_CODE_OAUTH_TOKEN"
+    )
+    info(f"token will be set as: {token_key}")
+
+    step(5, "Creating logs directory")
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.chmod(0o700)
+    info(f"{LOGS_DIR}")
+
+    step(6, "Generating plist")
+    plist_bytes = build_plist(python=python, repo_root=repo_root, token=token, token_key=token_key)
+    if args.dry_run:
+        print("\n--- plist (dry run, not written) ---\n")
+        print(plist_bytes.decode("utf-8"))
+        print("--- end plist ---\n")
+        return
+    PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PLIST_PATH.write_bytes(plist_bytes)
+    PLIST_PATH.chmod(0o600)
+    info(f"wrote {PLIST_PATH} (mode 0600)")
+
+    step(7, "Validating plist with plutil")
+    validate_plist()
+    info("plist syntax OK")
+
+    step(8, "Bootstrapping the agent")
+    bootstrap()
+
+    step(9, "Waiting for first heartbeat")
+    status = wait_for_status(timeout_seconds=20)
+    if status is None:
+        warn(
+            "status.json didn't appear in 20s. The daemon may have "
+            "crashed on startup. Check:\n"
+            f"    tail {LOGS_DIR}/stderr.log\n"
+            "  Most common cause: Full Disk Access not granted to the "
+            "Python binary above."
+        )
+    else:
+        info(
+            f"status.json present  paused={status.get('paused')}  "
+            f"cursor={status.get('cursor', '?')}"
+        )
+
+    print_post_install_notes(python)
+
+
+def cmd_uninstall(_args: argparse.Namespace) -> None:
+    print(f"\nUninstalling launchd agent: {AGENT_LABEL}")
+    if not PLIST_PATH.exists() and not is_loaded():
+        info("nothing to uninstall — neither plist file nor loaded service found")
+        return
+    if is_loaded():
+        bootout()
+    if PLIST_PATH.exists():
+        PLIST_PATH.unlink()
+        info(f"removed {PLIST_PATH}")
+    print(
+        "\n  Note: ~/.claude-imessage-bridge/ (state.db, logs/, status.json) "
+        "is\n  PRESERVED. Delete it manually if you want a clean wipe."
+    )
+
+
+def cmd_status(_args: argparse.Namespace) -> None:
+    print(f"\nAgent: {AGENT_LABEL}")
+    info(f"plist:  {PLIST_PATH} ({'present' if PLIST_PATH.exists() else 'MISSING'})")
+    info(f"loaded: {'yes' if is_loaded() else 'no'}")
+    if STATUS_JSON.is_file():
+        try:
+            s = json.loads(STATUS_JSON.read_text())
+            info(
+                f"status: cursor={s.get('cursor')}  paused={s.get('paused')}  "
+                f"consec_failures={s.get('consecutive_failures', 0)}  "
+                f"ts={s.get('ts')}"
+            )
+        except json.JSONDecodeError:
+            info("status.json: malformed (mid-write or corrupt)")
+    else:
+        info("status.json: not present (daemon may not have started yet)")
+
+
+# --- Post-install instructions ------------------------------------------
+
+
+def print_post_install_notes(python: Path) -> None:
+    print(
+        f"""
+================================================================
+ONE-TIME MANUAL STEPS (Apple won't let scripts do these)
+================================================================
+
+The daemon is loaded, but macOS still needs you to grant TWO
+permissions to the EXACT Python binary launchd will run.
+
+If you skip these, the daemon will crash-restart in a loop and
+log to:
+    {LOGS_DIR}/stderr.log
+
+(A) Full Disk Access — required to read chat.db
+    1. Open: System Settings → Privacy & Security → Full Disk Access
+    2. Click + (you may need to unlock with Touch ID / password)
+    3. Hit ⌘⇧G ("Go to folder") and paste this exact path:
+       {python}
+    4. Click Open, then toggle the entry ON
+
+(B) Automation > Messages — required to send replies
+    macOS prompts on the first send. Just accept the prompt.
+    If you accidentally clicked Deny, fix it at:
+    System Settings → Privacy & Security → Automation → (your
+    Python) → Messages
+
+After (A), restart the agent so it can re-try chat.db:
+    launchctl kickstart -k {service_target()}
+
+================================================================
+VERIFY EVERYTHING IS WORKING
+================================================================
+
+  # Status snapshot:
+  scripts/cimb-install-agent --status
+
+  # Or directly:
+  cat ~/.claude-imessage-bridge/status.json | python3 -m json.tool
+
+  # Tail the logs:
+  tail -f ~/.claude-imessage-bridge/logs/stderr.log
+
+================================================================
+USEFUL COMMANDS LATER
+================================================================
+
+  # Pause without unloading:
+  touch  ~/.claude-imessage-bridge/PAUSE     # pause
+  rm     ~/.claude-imessage-bridge/PAUSE     # resume
+
+  # Restart (after editing config.yaml, for example):
+  launchctl kickstart -k {service_target()}
+
+  # Stop + uninstall completely:
+  scripts/cimb-install-agent --uninstall
+
+You can close this terminal now — the daemon survives logout and
+restarts on next login.
+"""
+    )
+
+
+# --- CLI parsing ---------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="cimb-install-agent",
+        description="Install / uninstall the claude-imessage-bridge launchd agent.",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--uninstall", action="store_true", help="Stop and remove the agent")
+    mode.add_argument(
+        "--status",
+        action="store_true",
+        help="Show whether the agent is installed and running",
+    )
+    mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the plist that would be written; don't write or load it",
+    )
+    parser.add_argument(
+        "--python",
+        metavar="PATH",
+        default=None,
+        help="Override Python binary detection (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--token",
+        metavar="TOKEN",
+        default=None,
+        help=(
+            "OAuth token / API key. If omitted, reads "
+            "$CLAUDE_CODE_OAUTH_TOKEN or $ANTHROPIC_API_KEY, or prompts."
+        ),
+    )
+    parser.add_argument(
+        "--token-kind",
+        choices=("oauth", "api"),
+        default="oauth",
+        help=(
+            "Which env var to set: oauth → CLAUDE_CODE_OAUTH_TOKEN, "
+            "api → ANTHROPIC_API_KEY. Default: oauth."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    if args.uninstall:
+        cmd_uninstall(args)
+    elif args.status:
+        cmd_status(args)
+    else:
+        cmd_install(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

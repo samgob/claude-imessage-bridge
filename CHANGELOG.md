@@ -4,6 +4,12 @@ All notable changes to claude-imessage-bridge. Versions follow [Semantic Version
 
 This project is **pre-1.0**. Public APIs (config schema, state.db schema, audit-log shape) may change between minor versions. Breaking changes are called out explicitly.
 
+## [Unreleased]
+
+### Added
+
+- **One-command launchd install: `scripts/cimb-install-agent`.** Wraps Python detection, plist generation, plutil validation, bootstrap, and post-install verification into a single command. Has `--dry-run`, `--status`, `--uninstall` modes. The two steps Apple won't let scripts do (Full Disk Access + Automation > Messages grants) print as exact paste-able paths at the end.
+
 ## [0.1.0-pre.1] — 2026-05-24 (Phase E: images, audio, edit UX)
 
 ### Pre-publication hardening pass (2026-05-24)

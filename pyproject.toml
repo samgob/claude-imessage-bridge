@@ -58,3 +58,8 @@ skips = ["B404", "B603"]
 
 [tool.ruff]
 line-length = 100
+# Operator scripts under scripts/ are extensionless executables with
+# a Python shebang. Ruff defaults to .py-only discovery; add the
+# explicit names so check / format / format --check don't silently
+# skip them.
+extend-include = ["scripts/cimb-status", "scripts/cimb-install-agent"]

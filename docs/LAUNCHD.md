@@ -4,6 +4,35 @@ For unattended operation, run the daemon as a user-level launchd agent.
 This survives logout but NOT reboot until login (which is what you want
 — FDA-bearing processes should be tied to interactive login).
 
+## Quick install (recommended)
+
+Use the bundled `scripts/cimb-install-agent` — it does Python detection,
+plist generation, plutil validation, bootstrap, and post-install
+verification in one command:
+
+```bash
+cd /path/to/claude-imessage-bridge
+./scripts/cimb-install-agent
+```
+
+The script will prompt for an OAuth token if `$CLAUDE_CODE_OAUTH_TOKEN`
+isn't already in your env. After it finishes it prints exact paste-able
+paths for the two steps Apple won't let scripts do (granting Full Disk
+Access and Automation > Messages to the launched Python binary).
+
+Other modes:
+
+```bash
+./scripts/cimb-install-agent --dry-run    # print the plist, don't write
+./scripts/cimb-install-agent --status     # check installed/loaded state
+./scripts/cimb-install-agent --uninstall  # stop + remove (keeps state.db)
+./scripts/cimb-install-agent --python /opt/local/bin/python3.12
+```
+
+The rest of this doc walks the same install manually for operators who
+prefer the long form or need to customize the plist beyond what the
+script exposes.
+
 ## ⚠️ Read before you do this
 
 - FDA is **per-binary**. Grant Full Disk Access to the *exact* Python

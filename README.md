@@ -315,7 +315,7 @@ Full design rationale: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 - [docs/AUDIT_LOG_COOKBOOK.md](docs/AUDIT_LOG_COOKBOOK.md) — common SQL queries on `state.db`
 - [docs/RECOVERY.md](docs/RECOVERY.md) — restoring from a corrupted DB, clearing the cursor, etc.
-- [docs/LAUNCHD.md](docs/LAUNCHD.md) — running the daemon under launchd
+- [docs/LAUNCHD.md](docs/LAUNCHD.md) — running the daemon under launchd (use `./scripts/cimb-install-agent` for a one-command install)
 - [docs/TOOL_OPT_IN.md](docs/TOOL_OPT_IN.md) — decision tree for adding tools to `allowed_tools`
 
 ## License
