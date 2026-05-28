@@ -10,6 +10,10 @@ This project is **pre-1.0**. Public APIs (config schema, state.db schema, audit-
 
 - **One-command launchd install: `scripts/cimb-install-agent`.** Wraps Python detection, plist generation, plutil validation, bootstrap, and post-install verification into a single command. Has `--dry-run`, `--status`, `--uninstall` modes. The two steps Apple won't let scripts do (Full Disk Access + Automation > Messages grants) print as exact paste-able paths at the end.
 
+### Fixed
+
+- **`cimb-install-agent` token-kind heuristic mis-routed OAuth tokens.** The earlier check `token.startswith("sk-ant-")` treated any `sk-ant-*` value as an API key and put it under `ANTHROPIC_API_KEY`. Anthropic's `claude setup-token` outputs `sk-ant-oat01-…` (OAuth) which belongs under `CLAUDE_CODE_OAUTH_TOKEN`; the mis-routed token was rejected with "Invalid API key" and the daemon failed silently at the first claude call. The script now distinguishes `sk-ant-api…` from `sk-ant-oat…` (with a `warn()` + safe default for any other prefix).
+
 ## [0.1.0-pre.1] — 2026-05-24 (Phase E: images, audio, edit UX)
 
 ### Pre-publication hardening pass (2026-05-24)

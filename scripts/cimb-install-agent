@@ -317,11 +317,31 @@ def cmd_install(args: argparse.Namespace) -> None:
 
     step(4, "Resolving auth token")
     token = resolve_token(args.token)
-    token_key = (
-        "ANTHROPIC_API_KEY"
-        if token.startswith("sk-ant-") or args.token_kind == "api"
-        else "CLAUDE_CODE_OAUTH_TOKEN"
-    )
+    # Anthropic token prefixes (verified against `claude setup-token`
+    # output and the API key docs):
+    #   sk-ant-api01-…   → standard API key       → ANTHROPIC_API_KEY
+    #   sk-ant-oat01-…   → OAuth token from CLI   → CLAUDE_CODE_OAUTH_TOKEN
+    # Both share the sk-ant- prefix; an earlier heuristic of
+    # "starts with sk-ant- → ANTHROPIC_API_KEY" mis-classified every
+    # OAuth token and led Anthropic to reject it as "Invalid API key"
+    # at the daemon's first claude call.
+    if args.token_kind == "api":
+        token_key = "ANTHROPIC_API_KEY"
+    elif args.token_kind == "oauth":
+        token_key = "CLAUDE_CODE_OAUTH_TOKEN"
+    elif token.startswith("sk-ant-api"):
+        token_key = "ANTHROPIC_API_KEY"
+    elif token.startswith("sk-ant-oat"):
+        token_key = "CLAUDE_CODE_OAUTH_TOKEN"
+    else:
+        # Unknown prefix — default to OAuth (the recommended path from
+        # `claude setup-token`). Operator can override with --token-kind.
+        warn(
+            f"token has an unrecognized prefix ({token[:10]}…). "
+            "Assuming it's an OAuth token. If that's wrong, re-run with "
+            "--token-kind api to use ANTHROPIC_API_KEY instead."
+        )
+        token_key = "CLAUDE_CODE_OAUTH_TOKEN"
     info(f"token will be set as: {token_key}")
 
     step(5, "Creating logs directory")
