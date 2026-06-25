@@ -45,12 +45,12 @@ HEARTBEAT_INTERVAL_SECONDS = 300
 # because this daemon heartbeats every 300s, not every ~1s.
 STALE_SECONDS = 2 * HEARTBEAT_INTERVAL_SECONDS  # 600
 
-# Don't kickstart again within this window. It MUST exceed the heartbeat interval:
-# the daemon sets last_heartbeat at startup but does NOT write status.json until
-# one full interval later (src/daemon.py ~L1638/L1689 — no startup write), so a
-# freshly-restarted daemon leaves status.json showing the OLD ts for ~300s. If the
-# cooldown were <= the interval, the watchdog could re-fire on that stale-but-fresh
-# file and loop. Interval + 120s margin guarantees >=1 real heartbeat first.
+# Don't kickstart again within this window — let a restarted daemon come up and
+# stamp a fresh heartbeat before re-evaluating. The daemon now writes status.json
+# on startup (src/daemon.py, just after last_heartbeat is set), so the fresh ts
+# normally appears within seconds. Kept > the 300s heartbeat interval as a safety
+# net: if that startup write ever fails (write_status swallows OSError), the file
+# could stay stale for up to one interval, and this margin prevents a re-fire loop.
 COOLDOWN_SECONDS = HEARTBEAT_INTERVAL_SECONDS + 120  # 420
 
 AGENT_LABEL = "dev.samgob.claude-imessage-bridge"

@@ -1637,6 +1637,19 @@ def main(argv: list[str] | None = None) -> int:
     last_prune = time.time()
     last_heartbeat = time.time()
 
+    # Write status.json immediately on startup. The loop below only refreshes it
+    # once per HEARTBEAT_INTERVAL_SECONDS, so without this a freshly (re)started
+    # daemon would leave the previous run's stale snapshot on disk for up to one
+    # full interval — misleading cimb-status and forcing cimb-watchdog to rely on
+    # a generous post-restart cooldown. Stamping it now closes that blind window.
+    _heartbeat(
+        state_dir=state_dir,
+        cursor=cursor,
+        cfg=cfg,
+        paused=_is_paused(state_dir),
+        stop_requested=False,
+    )
+
     while _running:
         if _stop_requested(state_dir):
             break
