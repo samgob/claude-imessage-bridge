@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""cimb-watchdog — restart the bridge if its heartbeat goes stale.
+
+The daemon stamps ``~/.claude-imessage-bridge/status.json`` with a ``ts`` every
+heartbeat tick (300s). launchd ``KeepAlive`` restarts the bridge only when the
+process *exits* — it cannot see a process that is alive but whose work loop has
+hung. This watchdog closes that gap: run it on a short interval (launchd
+``StartInterval`` 60s); if ``status.json`` is older than ``STALE_SECONDS`` the
+loop is hung, so we ``launchctl kickstart -k`` the agent to force a fresh start.
+
+It reads the heartbeat FILE AGE only — it never touches iMessage or Claude — so
+it has no side effects on a healthy bridge. Mirrors the Telegram bot's heartbeat
+watchdog; added after the 2026-06-24 zombie-poller incident on the sibling bot.
+
+Safeguards:
+  * If the launchd agent is not loaded, do nothing (respects a deliberate stop).
+  * If ``stop_requested`` is set, do nothing (a shutdown is in progress).
+  * If ``status.json`` is missing/unparseable, do nothing (no real stale signal).
+  * After a kickstart, honor a cooldown so we don't re-fire during startup.
+
+Exit codes:
+  0  ran (healthy, skipped, or kickstarted — all normal)
+  1  unexpected error
+
+Usage: ``python3 scripts/cimb-watchdog``  (or run it from launchd)
+
+Standalone — no project import, so it runs from launchd/cron without the package.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Mirror src/daemon.py:HEARTBEAT_INTERVAL_SECONDS (also mirrored in cimb-status).
+HEARTBEAT_INTERVAL_SECONDS = 300
+
+# Stale past 2x the heartbeat interval => the loop is hung (one missed tick is
+# normal jitter; two missed ticks is not). Larger than the Telegram bot's 180s
+# because this daemon heartbeats every 300s, not every ~1s.
+STALE_SECONDS = 2 * HEARTBEAT_INTERVAL_SECONDS  # 600
+
+# Don't kickstart again within this window. It MUST exceed the heartbeat interval:
+# the daemon sets last_heartbeat at startup but does NOT write status.json until
+# one full interval later (src/daemon.py ~L1638/L1689 — no startup write), so a
+# freshly-restarted daemon leaves status.json showing the OLD ts for ~300s. If the
+# cooldown were <= the interval, the watchdog could re-fire on that stale-but-fresh
+# file and loop. Interval + 120s margin guarantees >=1 real heartbeat first.
+COOLDOWN_SECONDS = HEARTBEAT_INTERVAL_SECONDS + 120  # 420
+
+AGENT_LABEL = "dev.samgob.claude-imessage-bridge"
+STATE_DIR = Path.home() / ".claude-imessage-bridge"
+STATUS_PATH = STATE_DIR / "status.json"
+COOLDOWN_FILE = STATE_DIR / ".watchdog-cooldown"
+
+
+def _ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _log(msg: str) -> None:
+    print(f"{_ts()} {msg}", flush=True)
+
+
+def _agent_loaded() -> bool:
+    try:
+        out = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        # If we can't tell, assume loaded so a real hang still gets handled.
+        return True
+    return any(AGENT_LABEL in line for line in out.splitlines())
+
+
+def _in_cooldown(now: int) -> bool:
+    try:
+        last = int(COOLDOWN_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return now - last < COOLDOWN_SECONDS
+
+
+def _kickstart() -> None:
+    uid = os.getuid()
+    subprocess.run(
+        ["launchctl", "kickstart", "-k", f"gui/{uid}/{AGENT_LABEL}"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def main() -> int:
+    now = int(time.time())
+
+    if not _agent_loaded():
+        _log(f"agent '{AGENT_LABEL}' not loaded; skipping (deliberately stopped?)")
+        return 0
+
+    if _in_cooldown(now):
+        _log("cooldown active since last kickstart; skipping")
+        return 0
+
+    try:
+        status = json.loads(STATUS_PATH.read_text())
+    except (OSError, ValueError) as e:
+        # No trustworthy signal — never restart on a missing/garbage file.
+        _log(f"status.json unreadable ({e}); not acting")
+        return 0
+
+    if status.get("stop_requested"):
+        _log("stop_requested=true; skipping (deliberate shutdown)")
+        return 0
+
+    ts_raw = status.get("ts")
+    try:
+        hb = (
+            datetime.strptime(ts_raw, "%Y-%m-%dT%H:%M:%SZ")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+    except (TypeError, ValueError):
+        _log(f"status.json ts unparseable ({ts_raw!r}); not acting")
+        return 0
+
+    age = int(now - hb)
+    paused = bool(status.get("paused"))
+
+    if age <= STALE_SECONDS:
+        _log(f"OK: heartbeat {age}s old (paused={paused})")
+        return 0
+
+    _log(f"STALE: heartbeat {age}s old (> {STALE_SECONDS}s) — kickstarting {AGENT_LABEL}")
+    try:
+        COOLDOWN_FILE.write_text(str(now))
+    except OSError:
+        pass
+    _kickstart()
+    _log(f"kickstart issued for {AGENT_LABEL}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:  # pragma: no cover - defensive top-level guard
+        _log(f"watchdog error: {e}")
+        sys.exit(1)
