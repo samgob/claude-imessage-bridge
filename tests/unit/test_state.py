@@ -656,3 +656,66 @@ def test_schema_migration_from_v0_adds_columns(state_dir: Path):
     assert "cost_cents" in cols
     assert "error_category" in cols
     assert version == state.SCHEMA_VERSION
+
+
+# --- sent_dedupe: persistent delayed-echo dedupe (v4) -------------------
+
+
+def test_record_sent_roundtrip_and_ttl(state_dir: Path):
+    state.record_sent("+1555", "digest-a", now=1000.0, state_dir=state_dir)
+    # Still recognized a full day later (the observed iCloud echo delay).
+    assert state.was_recently_sent("+1555", "digest-a", now=1000.0 + 24 * 3600, state_dir=state_dir)
+    # Expired past the TTL.
+    assert not state.was_recently_sent(
+        "+1555",
+        "digest-a",
+        now=1000.0 + state.SENT_DEDUPE_TTL_SECONDS + 1,
+        state_dir=state_dir,
+    )
+    # No cross-handle or cross-digest collisions.
+    assert not state.was_recently_sent("+1999", "digest-a", now=1000.0, state_dir=state_dir)
+    assert not state.was_recently_sent("+1555", "digest-b", now=1000.0, state_dir=state_dir)
+
+
+def test_record_sent_same_digest_refreshes_ts(state_dir: Path):
+    """Re-sending the same body must refresh the row, not raise on the
+    (handle, digest) primary key."""
+    state.record_sent("+1555", "digest-a", now=1000.0, state_dir=state_dir)
+    later = 1000.0 + state.SENT_DEDUPE_TTL_SECONDS - 10
+    state.record_sent("+1555", "digest-a", now=later, state_dir=state_dir)
+    # Alive relative to the SECOND send, not the first.
+    assert state.was_recently_sent(
+        "+1555", "digest-a", now=later + state.SENT_DEDUPE_TTL_SECONDS - 5, state_dir=state_dir
+    )
+
+
+def test_record_sent_prunes_expired_rows(state_dir: Path):
+    state.record_sent("+1555", "old", now=0.0, state_dir=state_dir)
+    state.record_sent("+1555", "new", now=state.SENT_DEDUPE_TTL_SECONDS + 10.0, state_dir=state_dir)
+    with state.connection(state_dir) as conn:
+        digests = [r["digest"] for r in conn.execute("SELECT digest FROM sent_dedupe")]
+    assert digests == ["new"]
+
+
+def test_schema_v3_to_v4_adds_sent_dedupe(state_dir: Path):
+    """A live v3 state.db (pre-2026-07-18) must gain the sent_dedupe
+    table on first touch by v4 code."""
+    import sqlite3
+
+    db_path = state_dir / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(state._SCHEMA_V0 + "\nPRAGMA user_version = 3;")
+        conn.commit()
+    finally:
+        conn.close()
+    os.chmod(db_path, 0o600)
+
+    state.init_state_dir(state_dir)
+    with state.connection(state_dir) as conn:
+        tables = {
+            r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert "sent_dedupe" in tables
+    assert version == state.SCHEMA_VERSION == 4

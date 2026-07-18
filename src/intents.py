@@ -64,12 +64,22 @@ class IntentMatch:
 
 _INTENTS: List[dict] = [
     # --- Destructive: require confirmation -----------------------------
+    # NOTE: paraphrases must NEVER themselves match any intent pattern or
+    # confirmation pattern. When the user messages themselves, the bridge's
+    # outbound paraphrase can sync back via iCloud as an inbound message —
+    # sometimes ~24h later, long past the in-memory echo-dedupe TTL. A
+    # paraphrase that matches its own trigger pattern then re-classifies
+    # and re-prompts, forever (observed live: a daily "Halt the daemon?"
+    # prompt looped 6/5–7/17 2026; a "/pause" variant 5/31–6/3). Enforced
+    # by test_no_canned_text_self_classifies; retired self-matching
+    # wordings live in RETIRED_PARAPHRASES so the daemon's canned-text
+    # echo guard still recognizes their late echoes.
     {
         "command": "/halt",
         "destructive": True,
         "paraphrase": (
-            "Halt the daemon? You'll need to restart from Terminal — "
-            "the bridge exits and won't auto-recover. Reply 'yes' to "
+            "Shut off the bridge? You'll need to restart it from "
+            "Terminal — it exits and won't auto-recover. Reply 'yes' to "
             "confirm, anything else cancels."
         ),
         "patterns": [
@@ -82,8 +92,8 @@ _INTENTS: List[dict] = [
         "command": "/pause",
         "destructive": True,
         "paraphrase": (
-            "Pause the bridge? Claude calls will be suspended until you "
-            "say resume. Reply 'yes' to confirm."
+            "Take a break? I'll go quiet and won't reply again until "
+            "you text 'resume'. Reply 'yes' to confirm."
         ),
         "patterns": [
             r"\b(pause|hold|suspend)\b.*\b(bridge|daemon|imessage|claude|messages)\b",
@@ -205,6 +215,38 @@ _INTENTS: List[dict] = [
         ],
     },
 ]
+
+
+# Paraphrase wordings the bridge used to send but no longer does. Their
+# iCloud echoes can still arrive long after an upgrade (delayed sync-backs
+# of up to ~24h were observed live), so the daemon's canned-text echo
+# guard must keep recognizing them. Append-only: never delete an entry,
+# a retired wording is retired forever.
+RETIRED_PARAPHRASES: tuple = (
+    # /halt wording, retired 2026-07-18: "Halt ... daemon" matched the
+    # /halt intent pattern itself → daily self-sustaining prompt loop.
+    "Halt the daemon? You'll need to restart from Terminal — "
+    "the bridge exits and won't auto-recover. Reply 'yes' to "
+    "confirm, anything else cancels.",
+    # /pause wording, retired 2026-07-18: "Pause ... Claude" matched the
+    # /pause intent pattern itself (same loop class, observed 5/31–6/3).
+    "Pause the bridge? Claude calls will be suspended until you "
+    "say resume. Reply 'yes' to confirm.",
+)
+
+
+def bridge_canned_texts() -> tuple:
+    """Every static text the bridge may send as a confirmation prompt,
+    current and retired.
+
+    The daemon hashes these into its canned-text echo guard: an inbound
+    message that byte-normalizes to one of these is, in practice, always
+    an iCloud echo of our own outbound (possibly a day late) — never
+    something a human typed — and must be dropped before intent
+    classification.
+    """
+    current = tuple(e["paraphrase"] for e in _INTENTS if e["paraphrase"])
+    return current + RETIRED_PARAPHRASES
 
 
 # Pre-compile patterns once at module load.

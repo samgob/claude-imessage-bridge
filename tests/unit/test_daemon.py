@@ -13,8 +13,19 @@ from __future__ import annotations
 import argparse
 from types import SimpleNamespace
 
+import pytest
 
-from src import daemon, imessage_reader
+from src import daemon, imessage_reader, intents
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sent_dedupe(monkeypatch):
+    """_record_self_send persists digests via state.record_sent, and the
+    inbound gate consults state.was_recently_sent — both hit the REAL
+    ~/.claude-imessage-bridge/state.db by default. Stub them for every
+    test in this file; tests that exercise the persistent tier re-patch."""
+    monkeypatch.setattr(daemon.state, "record_sent", lambda *a, **k: None)
+    monkeypatch.setattr(daemon.state, "was_recently_sent", lambda *a, **k: False)
 
 
 def _msg(
@@ -551,6 +562,7 @@ def _stub_state_for_handle_one(monkeypatch):
     )
     monkeypatch.setattr(daemon.state, "get_pending_intent", lambda handle: None)
     monkeypatch.setattr(daemon.state, "clear_pending_intent", lambda handle: None)
+    monkeypatch.setattr(daemon.state, "set_pending_intent", lambda *a, **k: None)
     monkeypatch.setattr(daemon.state, "trip_pause", lambda **_: None)
 
 
@@ -1032,3 +1044,137 @@ def test_text_only_message_does_not_trigger_attachment_path(monkeypatch):
         prompt, _ = runner_spy.calls[0]
         assert "Read tool" not in prompt
         assert "Files:" not in prompt
+
+
+# --- Canned-text echo guard (daily halt-prompt loop regression) ---------
+#
+# Root cause (observed live 6/5–7/17 2026): iCloud delivered a sync-back
+# echo of the bridge's own "/halt" confirmation paraphrase ~24h after the
+# send — past the in-memory dedupe TTL — and that paraphrase matched the
+# /halt intent regex itself, so the bridge re-classified its own prompt
+# and re-prompted, daily, forever. Three defenses, each tested here or in
+# test_intents/test_state:
+#   1. Paraphrases no longer match any intent pattern (test_intents).
+#   2. Canned bridge texts (current AND retired wordings) are dropped as
+#      echoes regardless of arrival delay (this section).
+#   3. Outbound digests persist in state.db for 48h (test_state) and the
+#      inbound gate consults them (this section).
+
+_OLD_HALT_PARAPHRASE = (
+    "Halt the daemon? You'll need to restart from Terminal — "
+    "the bridge exits and won't auto-recover. Reply 'yes' to "
+    "confirm, anything else cancels."
+)
+
+
+def test_canned_digests_cover_current_and_retired_paraphrases():
+    for entry in intents._INTENTS:
+        if entry["paraphrase"]:
+            assert daemon._is_canned_bridge_text(entry["paraphrase"])
+    for retired in intents.RETIRED_PARAPHRASES:
+        assert daemon._is_canned_bridge_text(retired)
+    assert not daemon._is_canned_bridge_text("kill the bridge")
+    assert not daemon._is_canned_bridge_text("hello")
+
+
+def test_canned_bridge_text_survives_imessage_rewrites():
+    """iMessage rewrites quotes/dashes between send and sync-back; the
+    guard hashes normalized bodies so the echo still matches."""
+    mangled = _OLD_HALT_PARAPHRASE.replace("'", "’").replace("—", "-")
+    assert daemon._is_canned_bridge_text(mangled)
+    assert daemon._is_canned_bridge_text(_OLD_HALT_PARAPHRASE.upper())
+
+
+def test_delayed_echo_of_old_halt_prompt_dropped(monkeypatch):
+    """THE regression: yesterday's halt prompt arriving inbound today must
+    be silently dropped — no reply, no claude call, no pending intent."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()  # in-memory ring empty: echo is "late"
+    daemon._recent_outbound.clear()
+    spy = _SendSpy()
+    monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+    pending_set: list = []
+    monkeypatch.setattr(daemon.state, "set_pending_intent", lambda *a, **k: pending_set.append(a))
+
+    msg = _msg("+15551234567", body=_OLD_HALT_PARAPHRASE)
+    daemon._handle_one(msg, _cfg())
+
+    assert spy.sent == []  # no re-prompt: the daily loop is dead
+    assert runner_spy.calls == []
+    assert pending_set == []
+
+
+def test_delayed_echo_of_current_paraphrases_dropped(monkeypatch):
+    """Same guard must hold for every CURRENT paraphrase, so a future
+    rewording can't resurrect the loop through the time-based gap."""
+    _stub_state_for_handle_one(monkeypatch)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+    for entry in intents._INTENTS:
+        if not entry["paraphrase"]:
+            continue
+        daemon._recent_self_sends.clear()
+        daemon._recent_outbound.clear()
+        spy = _SendSpy()
+        monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+        runner_spy = _RunClaudeSpy()
+        monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+
+        daemon._handle_one(_msg("+15551234567", body=entry["paraphrase"]), _cfg())
+
+        assert spy.sent == [], f"paraphrase for {entry['command']} triggered a reply"
+        assert runner_spy.calls == []
+
+
+def test_persistent_dedupe_drops_late_echo_of_arbitrary_reply(monkeypatch):
+    """Non-canned outbound (e.g. a Claude reply) echoing back late is
+    caught by the persistent sent-digest tier."""
+    _stub_state_for_handle_one(monkeypatch)
+    daemon._recent_self_sends.clear()  # in-memory ring: empty (echo is late)
+    daemon._recent_outbound.clear()
+    spy = _SendSpy()
+    monkeypatch.setattr(daemon.imessage_sender, "send", spy)
+    runner_spy = _RunClaudeSpy()
+    monkeypatch.setattr(daemon.claude_runner, "run_claude", runner_spy)
+    monkeypatch.setattr(daemon, "_is_paused", lambda _sd: False)
+
+    body = "Sure — the Wesco sync is at 3pm ET tomorrow."
+    handle = "+15551234567"
+    expected_digest = daemon._body_digest(body)
+    monkeypatch.setattr(
+        daemon.state,
+        "was_recently_sent",
+        lambda h, d, **k: h == handle and d == expected_digest,
+    )
+
+    daemon._handle_one(_msg(handle, body=body), _cfg())
+    assert spy.sent == []
+    assert runner_spy.calls == []
+
+    # A genuinely new message from the same handle still goes through.
+    daemon._handle_one(_msg(handle, body="what's on my calendar"), _cfg())
+    assert len(runner_spy.calls) == 1
+
+
+def test_record_self_send_persists_digest(monkeypatch):
+    """Every outbound recorded in the ring must also land in state.db so
+    the dedupe survives restarts and multi-hour echo delays."""
+    daemon._recent_self_sends.clear()
+    recorded: list = []
+    monkeypatch.setattr(daemon.state, "record_sent", lambda h, d, **k: recorded.append((h, d)))
+    daemon._record_self_send("+15551234567", "some reply")
+    assert recorded == [("+15551234567", daemon._body_digest("some reply"))]
+
+
+def test_record_self_send_survives_persist_failure(monkeypatch):
+    """A state.db hiccup must never break sending or the in-memory ring."""
+    daemon._recent_self_sends.clear()
+
+    def _boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(daemon.state, "record_sent", _boom)
+    daemon._record_self_send("+15551234567", "some reply")  # must not raise
+    assert daemon._is_recent_self_send("+15551234567", "some reply")

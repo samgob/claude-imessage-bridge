@@ -12,6 +12,25 @@ This project is **pre-1.0**. Public APIs (config schema, state.db schema, audit-
 
 ### Fixed
 
+- **Daily self-sustaining "Halt the daemon?" prompt loop.** iCloud can
+  deliver a sync-back echo of the bridge's own outbound ~24h after the
+  send — far past the 180s in-memory echo-dedupe ring — and the `/halt`
+  confirmation paraphrase ("Halt the daemon? …") matched the `/halt`
+  intent regex itself. Each day's prompt echoed back the next day, got
+  classified as a fresh halt request, and produced the next day's prompt
+  (observed live in the operator's self-chat thread 6/5–7/17 2026; a
+  `/pause`-wording variant looped 5/31–6/3). Three-layer fix:
+  1. `/halt` and `/pause` paraphrases reworded to be inert to every
+     intent + confirmation pattern; enforced by a new invariant test.
+     Old wordings are registered in `intents.RETIRED_PARAPHRASES`.
+  2. New canned-text echo guard: any inbound body that normalizes to a
+     bridge-authored paraphrase (current or retired) is dropped as an
+     echo regardless of arrival delay (audit `canned-text-echo`).
+  3. New persistent outbound-digest dedupe: `sent_dedupe` table
+     (state.db **schema v4**) keeps 48h of sent-body digests so late
+     echoes of *any* reply are recognized across restarts (audit
+     `self-send-echo-delayed`).
+
 - **`cimb-install-agent` token-kind heuristic mis-routed OAuth tokens.** The earlier check `token.startswith("sk-ant-")` treated any `sk-ant-*` value as an API key and put it under `ANTHROPIC_API_KEY`. Anthropic's `claude setup-token` outputs `sk-ant-oat01-…` (OAuth) which belongs under `CLAUDE_CODE_OAUTH_TOKEN`; the mis-routed token was rejected with "Invalid API key" and the daemon failed silently at the first claude call. The script now distinguishes `sk-ant-api…` from `sk-ant-oat…` (with a `warn()` + safe default for any other prefix).
 
 ## [0.1.0-pre.1] — 2026-05-24 (Phase E: images, audio, edit UX)

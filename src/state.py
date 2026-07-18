@@ -39,7 +39,21 @@ DEFAULT_STATE_DIR = Path.home() / ".claude-imessage-bridge"
 #   v3 — Session 2 (trust modes): add pending_intent_json + pending_intent_at
 #        to conversations for the natural-language intent confirmation
 #        flow (60s TTL on a pending confirmation per handle).
-SCHEMA_VERSION: int = 3
+#   v4 — Delayed-echo fix (2026-07-18): add sent_dedupe table. iCloud
+#        sync-backs of the bridge's own outbound were observed arriving
+#        ~24h after the send — far past the daemon's in-memory 180s echo
+#        ring — and one of them (the /halt confirmation paraphrase)
+#        matched its own intent regex, producing a self-sustaining daily
+#        prompt loop. sent_dedupe persists outbound body digests for
+#        SENT_DEDUPE_TTL_SECONDS so late echoes are recognized as ours.
+SCHEMA_VERSION: int = 4
+
+
+# How long an outbound digest counts as "recently sent". Must comfortably
+# exceed the longest observed iCloud sync-back delay (~24h); 48h gives 2x
+# headroom without letting the table grow meaningfully (it's pruned on
+# every insert).
+SENT_DEDUPE_TTL_SECONDS: int = 48 * 3600
 
 
 # v0 schema (what the project shipped pre-Phase-D). New installs leapfrog
@@ -159,6 +173,29 @@ def _ensure_conversations_v3_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE conversations ADD COLUMN pending_intent_at TEXT")
 
 
+def _ensure_sent_dedupe_v4_table(conn: sqlite3.Connection) -> None:
+    """v3 → v4. Add the ``sent_dedupe`` table for persistent outbound
+    echo dedupe.
+
+    One row per (handle, digest) the bridge sent recently. The daemon's
+    in-memory ring only spans 180s and dies on restart; iCloud sync-back
+    echoes were observed live arriving ~24h after the send, so the
+    delayed-echo check needs durable state. Rows older than
+    ``SENT_DEDUPE_TTL_SECONDS`` are pruned on every ``record_sent``.
+
+    Idempotent — CREATE IF NOT EXISTS.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sent_dedupe ("
+        "    handle TEXT NOT NULL,"
+        "    digest TEXT NOT NULL,"
+        "    ts REAL NOT NULL,"
+        "    PRIMARY KEY (handle, digest)"
+        ")"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_dedupe_ts ON sent_dedupe(ts)")
+
+
 def _apply_schema(conn: sqlite3.Connection) -> None:
     """Apply schema migrations forward to ``SCHEMA_VERSION``.
 
@@ -194,6 +231,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         if current < 3:
             _ensure_conversations_v3_columns(conn)
             current = 3
+        if current < 4:
+            _ensure_sent_dedupe_v4_table(conn)
+            current = 4
 
         # Any gap between the last registered step and SCHEMA_VERSION
         # means a maintainer bumped the version without adding a step.
@@ -325,6 +365,52 @@ def set_cursor(
             "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
             (name, new_value),
         )
+
+
+def record_sent(
+    handle: str,
+    digest: str,
+    *,
+    now: Optional[float] = None,
+    state_dir: Path = DEFAULT_STATE_DIR,
+) -> None:
+    """Persist that the bridge sent a body with ``digest`` to ``handle``.
+
+    Backs the delayed-echo dedupe: iCloud sync-backs of our own outbound
+    can arrive ~24h late (observed live), so the daemon consults this
+    table in addition to its in-memory ring. Also prunes rows older than
+    ``SENT_DEDUPE_TTL_SECONDS`` so the table stays bounded.
+    """
+    ts = time.time() if now is None else now
+    with connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO sent_dedupe (handle, digest, ts) VALUES (?, ?, ?) "
+            "ON CONFLICT(handle, digest) DO UPDATE SET ts = excluded.ts",
+            (handle, digest, ts),
+        )
+        conn.execute(
+            "DELETE FROM sent_dedupe WHERE ts < ?",
+            (ts - SENT_DEDUPE_TTL_SECONDS,),
+        )
+
+
+def was_recently_sent(
+    handle: str,
+    digest: str,
+    *,
+    now: Optional[float] = None,
+    state_dir: Path = DEFAULT_STATE_DIR,
+) -> bool:
+    """True if the bridge sent ``digest`` to ``handle`` within
+    ``SENT_DEDUPE_TTL_SECONDS`` — i.e. an inbound body with this digest
+    is an echo of our own outbound, however late iCloud delivered it."""
+    ts = time.time() if now is None else now
+    with connection(state_dir) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sent_dedupe WHERE handle = ? AND digest = ? AND ts >= ?",
+            (handle, digest, ts - SENT_DEDUPE_TTL_SECONDS),
+        ).fetchone()
+        return row is not None
 
 
 def get_current_session(handle: str, *, state_dir: Path = DEFAULT_STATE_DIR) -> Optional[str]:

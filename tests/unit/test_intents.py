@@ -230,3 +230,61 @@ def test_is_confirmation_no_positive(body):
 )
 def test_is_confirmation_no_negative(body):
     assert not intents.is_confirmation_no(body)
+
+
+# --- Self-classification invariant (daily halt-prompt loop regression) --
+#
+# The bridge's own confirmation paraphrases sync back via iCloud as
+# inbound messages — sometimes ~24h late. A paraphrase that matches any
+# intent pattern (or reads as a yes/no confirmation) turns that echo into
+# a fresh command and the bridge re-prompts itself forever (observed
+# live: daily "Halt the daemon?" texts 6/5–7/17 2026). Every canned text
+# must therefore be inert to the classifier.
+
+
+def test_no_canned_text_self_classifies():
+    for entry in intents._INTENTS:
+        p = entry["paraphrase"]
+        if not p:
+            continue
+        assert intents.classify_intent(p) is None, (
+            f"paraphrase for {entry['command']} matches an intent pattern — "
+            "its iCloud echo would re-trigger the bridge (see the 2026 "
+            "daily halt-prompt loop)"
+        )
+        assert not intents.is_confirmation_yes(
+            p
+        ), f"paraphrase for {entry['command']} reads as a YES confirmation"
+        assert not intents.is_confirmation_no(
+            p
+        ), f"paraphrase for {entry['command']} reads as a NO confirmation"
+
+
+def test_retired_paraphrases_registered_for_echo_guard():
+    """The pre-2026-07-18 /halt and /pause wordings DID self-classify —
+    that's why they were retired. They must stay registered so the
+    daemon's canned-text guard keeps dropping their late echoes."""
+    assert len(intents.RETIRED_PARAPHRASES) >= 2
+    joined = " ".join(intents.RETIRED_PARAPHRASES)
+    assert "Halt the daemon?" in joined
+    assert "Pause the bridge?" in joined
+    canned = intents.bridge_canned_texts()
+    for retired in intents.RETIRED_PARAPHRASES:
+        assert retired in canned
+
+
+def test_old_halt_paraphrase_still_classifies_documenting_the_bug():
+    """Sanity: the retired /halt wording really does match the /halt
+    pattern (this is the bug the guard exists for). If the patterns ever
+    change such that it no longer matches, this test flags that the
+    RETIRED entry is only historical — safe, but worth knowing."""
+    old = intents.RETIRED_PARAPHRASES[0]
+    m = intents.classify_intent(old)
+    assert m is not None and m.command == "/halt"
+
+
+def test_bridge_canned_texts_includes_all_current_paraphrases():
+    canned = intents.bridge_canned_texts()
+    for entry in intents._INTENTS:
+        if entry["paraphrase"]:
+            assert entry["paraphrase"] in canned

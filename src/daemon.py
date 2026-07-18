@@ -144,6 +144,21 @@ def _body_digest(body: str) -> str:
     ).hexdigest()[:16]
 
 
+# Digests of every static confirmation prompt the bridge sends (current
+# AND retired wordings). iCloud can deliver a sync-back echo of our own
+# outbound up to ~24h late — far past RECENT_SELF_SEND_TTL_SECONDS — and
+# the original /halt paraphrase matched the /halt intent pattern itself,
+# so its late echo re-classified and re-prompted daily (observed live
+# 6/5–7/17 2026 in Sam's self-chat thread; a /pause variant 5/31–6/3).
+# Content-based guard: these exact texts are never treated as user input.
+_CANNED_TEXT_DIGESTS: frozenset = frozenset(_body_digest(t) for t in intents.bridge_canned_texts())
+
+
+def _is_canned_bridge_text(body: str) -> bool:
+    """True if ``body`` normalizes to a bridge-authored canned prompt."""
+    return _body_digest(body) in _CANNED_TEXT_DIGESTS
+
+
 def _record_self_send(handle: str, body: str) -> None:
     """Note that the bridge just sent ``body`` to ``handle``.
 
@@ -152,6 +167,15 @@ def _record_self_send(handle: str, body: str) -> None:
     detect a runaway-reply loop and trip PAUSE.
     """
     _recent_self_sends.append((time.time(), handle, _body_digest(body)))
+    # Persist the digest too: iCloud sync-back echoes have been observed
+    # arriving ~24h after the send (well past the in-memory TTL, and past
+    # any daemon restart). The state.db copy lets the inbound gate drop
+    # those late echoes. Best-effort — a send must never fail because
+    # dedupe bookkeeping did.
+    try:
+        state.record_sent(handle, _body_digest(body))
+    except Exception:
+        logger.debug("persistent send-dedupe record failed", exc_info=True)
     redacted = imessage_sender._redact_handle(handle)  # noqa: SLF001
     _check_outbound_rate(handle, redacted)
 
@@ -672,6 +696,29 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
         _metrics["drops_" + reason] += 1
         return
 
+    # Canned bridge-text echo guard. A bridge-authored confirmation
+    # prompt (current OR retired wording) arriving inbound is always an
+    # iCloud echo of our own outbound — sync-backs have been observed
+    # landing ~24h late, past every time-based dedupe. The original
+    # /halt paraphrase matched the /halt intent regex itself, so its
+    # late echo re-classified and re-prompted daily, forever (live
+    # 6/5–7/17 2026). Content-based, so it works at any delay.
+    if _is_canned_bridge_text(msg.body):
+        _metrics["canned_text_echoes_skipped"] += 1
+        logger.info(
+            "skipping canned bridge-text echo from %s (rowid=%d)",
+            redacted,
+            msg.rowid,
+        )
+        state.audit(
+            handle_redacted=redacted,
+            direction="in",
+            kind="drop",
+            detail="canned-text-echo",
+            chatdb_rowid=msg.rowid,
+        )
+        return
+
     # Self-chat echo dedupe. When user messages themselves, iCloud sync
     # bounces our outbound reply back as is_from_me=0 on the Mac. Skip
     # rows whose body matches a reply we sent to this handle in the last
@@ -689,6 +736,32 @@ def _handle_one(msg: imessage_reader.Message, cfg) -> None:
             direction="in",
             kind="drop",
             detail="self-send-echo",
+            chatdb_rowid=msg.rowid,
+        )
+        return
+
+    # Delayed-echo dedupe, persistent tier. The in-memory ring above
+    # only covers RECENT_SELF_SEND_TTL_SECONDS and dies with the
+    # process; state.db keeps outbound digests for
+    # state.SENT_DEDUPE_TTL_SECONDS so echoes that arrive hours-to-days
+    # late (or after a watchdog restart) are still recognized as ours.
+    try:
+        delayed_echo = state.was_recently_sent(norm, _body_digest(msg.body))
+    except Exception:
+        logger.debug("persistent send-dedupe lookup failed", exc_info=True)
+        delayed_echo = False
+    if delayed_echo:
+        _metrics["delayed_self_send_echoes_skipped"] += 1
+        logger.info(
+            "skipping delayed self-send echo from %s (rowid=%d)",
+            redacted,
+            msg.rowid,
+        )
+        state.audit(
+            handle_redacted=redacted,
+            direction="in",
+            kind="drop",
+            detail="self-send-echo-delayed",
             chatdb_rowid=msg.rowid,
         )
         return
